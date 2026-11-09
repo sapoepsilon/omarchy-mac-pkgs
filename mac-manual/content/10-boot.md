@@ -30,7 +30,7 @@ GRUB stays only as a recovery fallback while older Macs are moved over. New inst
 
 ## The kernel
 
-There is one kernel, `linux-aurora`, built in omarchy-pkgs from a pinned commit of [aurora-silicon/linux](https://github.com/aurora-silicon/linux). It provides `linux-asahi`, so nothing above the kernel cares about the name, and it does not provide `linux`, so it never replaces another aarch64 machine's kernel. Kernel tooling finds kernels by their package base, not by what they provide.
+There is one kernel, `linux-aurora`, built in omarchy-pkgs from a pinned commit of [aurora-silicon/linux](https://github.com/aurora-silicon/linux). It provides `linux-asahi`, so nothing above the kernel cares about the name, and it does not provide `linux`, so it never replaces another aarch64 machine's kernel. Kernel tooling finds kernels by their package base, not by what they provide. So does m1n1: its device trees come from the newest `linux-aurora` (or `linux-asahi`) module tree, even when another kernel installed beside it, such as a locally patched build under its own package base, has a newer one.
 
 ## Initramfs
 

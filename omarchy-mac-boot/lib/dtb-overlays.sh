@@ -146,23 +146,47 @@ dtb_overlays_apply() {
   done
 }
 
-# Sets DTBS for update-m1n1 when an overlay applies to one of the newest
-# kernel's device trees; otherwise leaves DTBS as it was.
+# The newest -ARCH tree whose pkgbase is linux-aurora or linux-asahi, so another
+# kernel installed beside it never hands m1n1 its device trees. Without one,
+# update-m1n1's own default: the newest -ARCH tree.
+dtb_overlays_kernel_modules() {
+  local root="${OMARCHY_DTB_OVERLAYS_ROOT:-}" trees tree
+  trees=$(/bin/ls -d "$root"/lib/modules/*-ARCH 2>/dev/null | sort -rV)
+  for tree in $trees; do
+    case "$(cat "$tree/pkgbase" 2>/dev/null)" in
+      linux-aurora | linux-asahi)
+        printf '%s\n' "$tree"
+        return 0
+        ;;
+    esac
+  done
+  printf '%s\n' "$trees" | head -1
+}
+
+# Sets DTBS for update-m1n1 to the Apple kernel's device trees when another
+# kernel's tree sorts above it, and to the overlaid copies when an overlay
+# applies to one of them; otherwise leaves DTBS as it was.
 dtb_overlays_update_m1n1() {
   local root="${OMARCHY_DTB_OVERLAYS_ROOT:-}" modules outdir list="" path
   outdir=$root/run/omarchy-dtb-overlays
   [ "${OMARCHY_DTB_OVERLAYS:-1}" != 0 ] || return 0
   [ -z "${DTBS:-}" ] || return 0
-  [ -n "$(dtb_overlays_list)" ] || return 0
   if ! dtb_overlays_supported "$root/usr/bin/update-m1n1"; then
-    echo "dtb-overlays: /usr/bin/update-m1n1 has a DTBS default this does not reproduce; device tree overlays are not applied" >&2
+    if [ -n "$(dtb_overlays_list)" ]; then
+      echo "dtb-overlays: /usr/bin/update-m1n1 has a DTBS default this does not reproduce; device tree overlays are not applied" >&2
+    fi
     return 0
   fi
+  modules=$(dtb_overlays_kernel_modules)
+  [ -n "$modules" ] || return 0
+  if [ "$modules" != "$(/bin/ls -d "$root"/lib/modules/*-ARCH | sort -rV | head -1)" ]; then
+    DTBS="$modules/dtbs/*.dtb"
+  fi
+  [ -n "$(dtb_overlays_list)" ] || return 0
   if ! dtb_overlays_tools; then
     echo "dtb-overlays: device tree overlays need dtc 1.7.1 or newer (dtc, fdtoverlay and fdtget); install or update dtc" >&2
     return 0
   fi
-  modules=$(/bin/ls -d "$root"/lib/modules/*-ARCH | sort -rV | head -1)
   rm -rf -- "$outdir"
   mkdir -p -- "$outdir" || return 0
   for path in $(dtb_overlays_apply "$outdir" "$modules"/dtbs/*.dtb); do

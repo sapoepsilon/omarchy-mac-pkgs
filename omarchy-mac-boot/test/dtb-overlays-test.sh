@@ -207,3 +207,31 @@ dtb_overlays_update_m1n1 2>"$tmp/err"
 [[ -z ${DTBS:-} ]] || fail "an update-m1n1 with another DTBS default gets no overlays"
 grep -Fq "does not reproduce" "$tmp/err" || fail "an unknown update-m1n1 is reported"
 pass "update-m1n1 gets the overlaid device trees only where it reproduces the default"
+
+# Another kernel installed beside the Apple one: update-m1n1 takes the newest
+# linux-aurora or linux-asahi tree by pkgbase, whichever tree sorts first.
+sed -i 's|sort -r |sort -rV |' "$root/usr/bin/update-m1n1"
+rm -rf "$root/lib/modules/6.1.0-1-ARCH" "$overlays/t8103-j293"
+other=$root/lib/modules/7.2.0-1-1-ARCH
+mkdir -p "$other/dtbs"
+cp "$dtbs/t8103-j293.dtb" "$other/dtbs/"
+printf 'linux-aurora\n' >"$root/lib/modules/$kver/pkgbase"
+printf 'linux-aurora-wip\n' >"$other/pkgbase"
+unset DTBS
+dtb_overlays_update_m1n1
+[[ $DTBS == "$dtbs/*.dtb" ]] || fail "a newer tree of another kernel does not hand m1n1 its device trees: ${DTBS:-unset}"
+[[ $(dtb_overlays_kernel_modules) == "$root/lib/modules/$kver" ]] || fail "the Apple kernel's tree is found by its pkgbase"
+overlay t8103-j293 board apple,t8103-ane
+unset DTBS
+dtb_overlays_update_m1n1
+[[ $DTBS == "$dtbs/t6001-j316c.dtb $dtbs/t8103-j274.dtb $out/t8103-j293.dtb" ]] ||
+  fail "the overlays apply to the Apple kernel's device trees, not the other kernel's: $DTBS"
+rm -rf "$overlays/t8103-j293"
+printf 'linux-asahi\n' >"$other/pkgbase"
+unset DTBS
+dtb_overlays_update_m1n1
+[[ -z ${DTBS:-} ]] || fail "when the newest tree is an Apple kernel's, update-m1n1 keeps its DTBS default: $DTBS"
+rm "$other/pkgbase" "$root/lib/modules/$kver/pkgbase"
+dtb_overlays_update_m1n1
+[[ -z ${DTBS:-} ]] || fail "when no tree names an Apple kernel, update-m1n1 keeps its DTBS default: $DTBS"
+pass "another kernel's newer tree never hands m1n1 its device trees, and the default stands otherwise"

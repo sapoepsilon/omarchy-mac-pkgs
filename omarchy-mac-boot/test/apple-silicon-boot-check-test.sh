@@ -631,6 +631,20 @@ mkdir -p "$root/usr/lib/modules/6.18.0-asahi-ARCH/dtbs"
 printf 'newer\n' >"$root/usr/lib/modules/6.18.0-asahi-ARCH/dtbs/t8103-j274.dtb"
 run_check
 expect_fail "a newer kernel's device trees picked by the default" "is not one of linux-aurora $kver's"
+# The packaged configuration names the Apple kernel's tree by its pkgbase, so
+# another kernel's newer tree is what m1n1 must not carry.
+cp "$ROOT/files/etc/default/update-m1n1" "$root/etc/default/update-m1n1"
+printf 'linux-aurora\n' >"$root/usr/lib/modules/$kver/pkgbase"
+printf 'linux-aurora-wip\n' >"$root/usr/lib/modules/6.18.0-asahi-ARCH/pkgbase"
+run_check
+expect_pass "m1n1 with linux-aurora's device trees while another kernel's tree sorts first"
+write_boot_bin /usr/lib/modules/6.18.0-asahi-ARCH/dtbs/t8103-j274.dtb
+run_check
+expect_fail "m1n1 with the other kernel's device trees" "is not m1n1, linux-aurora $kver's device trees"
+write_boot_bin "${dtbs[@]}"
+printf 'linux-asahi\n' >"$root/usr/lib/modules/6.18.0-asahi-ARCH/pkgbase"
+run_check
+expect_fail "a newer Apple kernel tree the configuration picks" "is not one of linux-aurora $kver's"
 system linux-aurora
 printf 'DTBS="%s %s"\n' "${dtbs[2]}" "${dtbs[0]}" >"$root/etc/default/update-m1n1"
 write_boot_bin "${dtbs[2]}" "${dtbs[0]}"

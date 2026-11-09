@@ -668,6 +668,11 @@ for entry in "${defaults[@]}"; do
       if [[ $value =~ $newest_dtbs ]]; then
         suffix=${BASH_REMATCH[4]}
         expanded=$(newest_match "${BASH_REMATCH[3]}")$suffix
+        # The configuration's dtb_overlays_update_m1n1 names the Apple kernel's tree instead.
+        if (( overlays_called )) && dtb_overlays_supported "$script"; then
+          expanded=$(OMARCHY_DTB_OVERLAYS_ROOT=$root dtb_overlays_kernel_modules)
+          [[ -z $expanded ]] || expanded="${expanded#"$root"}/dtbs/*.dtb"
+        fi
       fi
       ;;
   esac
