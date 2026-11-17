@@ -33,6 +33,8 @@ GRUB stays only as a recovery fallback while older Macs are moved over. New inst
 
 There is one kernel, `linux-aurora`, built in omarchy-pkgs from a pinned commit of [aurora-silicon/linux](https://github.com/aurora-silicon/linux). It provides `linux-asahi`, so nothing above the kernel cares about the name, and it does not provide `linux`, so it never replaces another aarch64 machine's kernel. Kernel tooling finds kernels by their package base, not by what they provide. So does m1n1: its device trees come from the newest `linux-aurora` (or `linux-asahi`) module tree, even when another kernel installed beside it, such as a locally patched build under its own package base, has a newer one.
 
+Such a kernel can declare itself a side kernel with an empty file named after its package base in `/usr/share/omarchy-mac-boot/side-kernels.d/`, as `linux-aurora-vmapple` (macOS guest VMs) does. The boot check then accepts it running, or first in the Limine menu as long as its UKI is on the ESP, and still checks `linux-aurora`'s own entry; an undeclared second kernel in either place fails the check.
+
 ## Initramfs
 
 The initramfs is systemd-based. Omarchy sets the platform's baseline of mkinitcpio hooks, and `omarchy-mac-boot` adds Apple fragments on top, in order, rather than overwriting it. The fragments only apply on an Apple Silicon Mac:

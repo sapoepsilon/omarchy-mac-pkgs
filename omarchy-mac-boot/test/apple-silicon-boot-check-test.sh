@@ -893,6 +893,49 @@ run_check
 expect_fail "no fstab row (Omarchy's btrfs @) and no subvolume flag" "does not select rootflags=subvol=@"
 pass "the Limine entry's rootflags follow the root filesystem"
 
+# A declared side kernel (linux-aurora-vmapple) may be put first in the menu
+# or be the running kernel; the Apple kernel's own entry is what is checked.
+# Its module tree sorts below the Apple kernel's, as m1n1's device trees are
+# that kernel's (the pkgbase case is the dtb-overlays tests').
+side_kernel_system() {
+  local side_uki
+  limine_system /boot/efi 'UUID=r / btrfs rw,subvol=/@ 0 0' 'root=UUID=r rw rootflags=subvol=@ quiet'
+  printf 'linux-aurora-vmapple\n' >>"$test_tmp/files/installed"
+  mkdir -p "$root/usr/share/omarchy-mac-boot/side-kernels.d" "$root/usr/lib/modules/6.1.0-vmapple1-ARCH"
+  : >"$root/usr/share/omarchy-mac-boot/side-kernels.d/linux-aurora-vmapple"
+  printf 'linux-aurora-vmapple\n' >"$root/usr/lib/modules/6.1.0-vmapple1-ARCH/pkgbase"
+  side_uki="$root/boot/efi/EFI/Linux/omarchy_linux-aurora-vmapple.efi"
+  printf 'side kernel\n' >"$side_uki"
+  { printf '/+Omarchy\n  //linux-aurora-vmapple\n    protocol: efi\n    path: boot():/EFI/Linux/omarchy_linux-aurora-vmapple.efi#%s\n    cmdline: root=UUID=r rw rootflags=subvol=@ quiet\n' \
+      "$(b2sum "$side_uki" | cut -d' ' -f1)"
+    sed '1d' "$root/boot/efi/limine.conf"; } >"$test_tmp/menu"
+  cp "$test_tmp/menu" "$root/boot/efi/limine.conf"
+}
+side_kernel_system
+run_check --boot-chain
+expect_pass "a declared side kernel first in the menu"
+grep -Fq "starts the side kernel linux-aurora-vmapple first" "$test_tmp/err" || fail "a side kernel first is named" "$(cat "$test_tmp/err")"
+side_kernel_system
+rm "$root/usr/share/omarchy-mac-boot/side-kernels.d/linux-aurora-vmapple"
+run_check --boot-chain
+expect_fail "an undeclared kernel first in the menu" "starts linux-aurora-vmapple first, not linux-asahi"
+side_kernel_system
+rm "$root/boot/efi/EFI/Linux/omarchy_linux-aurora-vmapple.efi"
+run_check --boot-chain
+expect_fail "a side kernel first without its UKI" "its UKI omarchy_linux-aurora-vmapple.efi is missing"
+limine_system /boot/efi 'UUID=r / btrfs rw,subvol=/@ 0 0' 'root=UUID=r rw rootflags=subvol=@ quiet'
+printf 'linux-aurora-vmapple\n' >>"$test_tmp/files/installed"
+mkdir -p "$root/usr/share/omarchy-mac-boot/side-kernels.d" "$root/usr/lib/modules/6.1.0-vmapple1-ARCH"
+: >"$root/usr/share/omarchy-mac-boot/side-kernels.d/linux-aurora-vmapple"
+printf 'linux-aurora-vmapple\n' >"$root/usr/lib/modules/6.1.0-vmapple1-ARCH/pkgbase"
+TEST_UNAME=6.1.0-vmapple1-ARCH run_check
+expect_pass "running a declared side kernel"
+grep -Fq "running the side kernel linux-aurora-vmapple" "$test_tmp/err" || fail "a running side kernel is named" "$(cat "$test_tmp/err")"
+rm "$root/usr/share/omarchy-mac-boot/side-kernels.d/linux-aurora-vmapple"
+TEST_UNAME=6.1.0-vmapple1-ARCH run_check
+expect_fail "running an undeclared second kernel" "running linux-aurora-vmapple 6.1.0-vmapple1-ARCH, not linux-asahi"
+pass "a declared side kernel may boot first or be running; the Apple kernel's entry is still checked"
+
 # U-Boot boots the loader on the system ESP the device tree names, so the
 # Limine files checked on ESP_PATH must be the ones there.
 limine_on_system_esp() {

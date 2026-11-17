@@ -70,6 +70,13 @@ installed=$(pacman -Qq) || fail "cannot list the installed packages"
 is_installed() {
   grep -Fxq -- "$1" <<<"$installed"
 }
+# A side kernel is an installed kernel package beside the Apple one, such as
+# linux-aurora-vmapple, that declares itself in side-kernels.d. It is never the
+# kernel this check verifies, but it may be booted or put first in the menu.
+side_kernel_dir=$(path /usr/share/omarchy-mac-boot/side-kernels.d)
+is_side_kernel() {
+  [[ $1 =~ ^linux-[A-Za-z0-9._-]+$ && -f $side_kernel_dir/$1 ]] && is_installed "$1"
+}
 # The ESP Limine's tooling writes to: ESP_PATH, /boot/efi or on older
 # installs /boot.
 limine_esp_path() {
@@ -208,9 +215,14 @@ if [[ $running_kver != "$kver" ]]; then
     # Another installed kernel, such as linux-aurora-wip picked in the menu.
     running_pkgbase=""
     [[ $running_kver == */* ]] || running_pkgbase=$(cat "$(path "/usr/lib/modules/$running_kver/pkgbase")" 2>/dev/null || true)
-    [[ -z $running_pkgbase || $running_pkgbase == "$kernel" ]] ||
-      fail "running $running_pkgbase $running_kver, not $kernel $kver, which the boot menu starts first; boot $kernel to check its boot files"
-    fail "running kernel is $running_kver, not the installed $kernel $kver"
+    if [[ -n $running_pkgbase ]] && is_side_kernel "$running_pkgbase"; then
+      echo "Apple Silicon boot check: running the side kernel $running_pkgbase $running_kver; checking the installed $kernel boot files" >&2
+      pending_reboot=1
+    else
+      [[ -z $running_pkgbase || $running_pkgbase == "$kernel" ]] ||
+        fail "running $running_pkgbase $running_kver, not $kernel $kver, which the boot menu starts first; boot $kernel to check its boot files"
+      fail "running kernel is $running_kver, not the installed $kernel $kver"
+    fi
   fi
 fi
 
@@ -414,8 +426,19 @@ if (( limine_mac )); then
   # linux-aurora-wip put ahead by a BOOT_ORDER edit, would boot instead of the
   # one checked here.
   first_kernel=$(sudo awk '{ sub(/^[[:space:]]+/, "") } /^\/\/[^\/]/ { print substr($0, 3); exit }' "$limine_cfg")
-  [[ $first_kernel == "$kernel" ]] ||
-    fail "$limine_esp/limine.conf starts ${first_kernel:-no kernel} first, not $kernel; put $kernel first in BOOT_ORDER in /etc/default/limine, then run sudo omarchy-mac-boot-update"
+  # A side kernel put first boots instead; its own UKI must be there, and the
+  # Apple kernel's entry, checked below, stays one menu entry away.
+  if [[ $first_kernel != "$kernel" ]] && is_side_kernel "$first_kernel"; then
+    sudo grep -Fq "boot():/EFI/Linux/omarchy_$first_kernel.efi" "$limine_cfg" &&
+      sudo test -s "$(path "$limine_esp/EFI/Linux/omarchy_$first_kernel.efi")" ||
+      fail "$limine_esp/limine.conf starts the side kernel $first_kernel first, but its UKI omarchy_$first_kernel.efi is missing; run sudo omarchy-mac-boot-update"
+    sudo grep -Eq "^[[:space:]]*//$kernel[[:space:]]*$" "$limine_cfg" ||
+      fail "$limine_esp/limine.conf starts the side kernel $first_kernel and has no $kernel entry; run sudo omarchy-mac-boot-update"
+    echo "Apple Silicon boot check: the boot menu starts the side kernel $first_kernel first; checking the $kernel entry" >&2
+  else
+    [[ $first_kernel == "$kernel" ]] ||
+      fail "$limine_esp/limine.conf starts ${first_kernel:-no kernel} first, not $kernel; put $kernel first in BOOT_ORDER in /etc/default/limine, then run sudo omarchy-mac-boot-update"
+  fi
   sudo grep -Fq "/EFI/Linux/omarchy_$kernel.efi" "$limine_cfg" ||
     fail "$limine_esp/limine.conf does not boot the $kernel UKI"
   [[ ${OMARCHY_BOOT_CHECK_ROLLBACK_ESP:-0} == 1 ]] ||
