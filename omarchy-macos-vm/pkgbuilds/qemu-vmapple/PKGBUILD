@@ -41,8 +41,8 @@ prepare() {
 
 build() {
   # LSE atomics: reims-vgpu needs target-cpu=native on aarch64 Linux (docs/graphics.md).
-  (cd reims && CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=native" \
-    cargo xtask dist --out "$srcdir/reims-dist")
+  # makepkg.conf's RUSTFLAGS would override the target-specific variable, so extend it.
+  (cd reims && RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=native" cargo xtask dist --out "$srcdir/reims-dist")
   mkdir -p qemu/build
   cd qemu/build
   PKG_CONFIG_PATH="$srcdir/reims-dist/lib/pkgconfig" ../configure \
