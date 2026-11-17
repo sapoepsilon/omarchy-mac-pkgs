@@ -26,12 +26,12 @@ _omvm_commit=e75eff0074e4c1937530d65d2b948fda965d0b95
 source=("qemu::git+https://github.com/steelbrain/qemu-reims-vgpu.git#commit=$_qemu_commit"
         "reims::git+https://github.com/steelbrain/reims-vgpu.git#commit=$_reims_commit"
         "metal2vulkan::git+https://github.com/steelbrain/metal2vulkan.git#commit=$_m2v_commit"
-        "omvm::git+https://github.com/sapoepsilon/omvm.git#commit=$_omvm_commit")
+        "omvm-patches::git+https://github.com/sapoepsilon/omvm.git#commit=$_omvm_commit")
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
 _prefix=/usr/lib/qemu-vmapple
 
 prepare() {
-  local patches=$srcdir/omvm/patches
+  local patches=$srcdir/omvm-patches/patches
   git -C reims -c user.name=makepkg -c user.email=makepkg@localhost am -q "$patches"/graphics/reims-vgpu/*.patch
   git -C metal2vulkan -c user.name=makepkg -c user.email=makepkg@localhost am -q "$patches"/graphics/metal2vulkan/*.patch
   git -C qemu -c user.name=makepkg -c user.email=makepkg@localhost am -q "$patches"/graphics/qemu/*.patch "$patches"/usb/*.patch
