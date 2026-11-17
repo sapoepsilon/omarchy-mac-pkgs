@@ -75,6 +75,8 @@ _check_kernelrelease() {
 }
 
 prepare() {
+  # Downloaded, not checked out: the recipe's executable bit does not come along.
+  chmod +x bindgen-kernel.py
   cd $_srcname
 
   echo "Setting version..."
