@@ -45,7 +45,7 @@ cd omarchy-mac-pkgs/omarchy-macos-vm/pkgbuilds
 (cd omvm && makepkg -fd)                      # -d: its depends are the two packages below
 (cd mesa-honeykrisp-vmapple && makepkg -f)
 (cd qemu-vmapple && makepkg -f)
-(cd linux-aurora-vmapple && OMARCHY_BUILD_JOBS=10 makepkg -f)
+(cd linux-aurora-vmapple && OMARCHY_BUILD_JOBS=10 makepkg -fC)   # -C: its prepare refuses a leftover build tree
 repo-add $PKGDEST/omarchy-macos-vm.db.tar.zst $PKGDEST/*.pkg.tar.*
 ```
 
