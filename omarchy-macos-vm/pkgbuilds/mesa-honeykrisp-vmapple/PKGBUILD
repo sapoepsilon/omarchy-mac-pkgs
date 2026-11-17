@@ -15,7 +15,7 @@ url="https://github.com/sapoepsilon/omvm"
 license=('MIT')
 depends=(libdrm libelf llvm-libs zstd expat wayland libxshmfence spirv-tools)
 makedepends=(git meson ninja python-mako python-yaml python-packaging glslang clang llvm
-             wayland-protocols libclc spirv-llvm-translator rust rust-bindgen cbindgen)
+             wayland-protocols libclc spirv-llvm-translator)
 options=('!lto')
 source=("mesa::git+https://gitlab.freedesktop.org/mesa/mesa.git#tag=mesa-$pkgver"
         honeykrisp-vmapple.patch)
