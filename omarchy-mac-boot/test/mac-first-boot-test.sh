@@ -294,6 +294,24 @@ expect_handoff "consuming install.conf"
 grep -Fxq deferred "$case_dir/deferred.log" || fail "deferred steps run after consume"
 echo 'ok - install.conf is consumed onto the root and deleted from the ESP'
 
+# ── macos_vm=1 requests the macOS VM stack ─────────────────────────────────
+new_case macos-vm
+write_esp 'format=1' 'encrypt=0' 'lane=rc' 'macos_vm=1'
+expect_handoff "an install.conf with macos_vm=1"
+[[ $(<"$root/etc/omarchy/macos-vm.enabled") == '{"version":1,"requested_by":"installer"}' ]] ||
+  fail "macos_vm=1 writes the macOS VM marker"
+[[ $(<"$root/var/lib/omarchy/mac-first-boot/install.conf") == $'format=1\nencrypt=0\nlane=rc\nmacos_vm=1' ]] ||
+  fail "the consumed file keeps the macos_vm line"
+new_case macos-vm-off
+write_esp 'format=1' 'encrypt=0' 'lane=rc'
+expect_handoff "a three-line install.conf"
+[[ ! -e $root/etc/omarchy/macos-vm.enabled ]] || fail "without macos_vm=1 no marker is written"
+new_case macos-vm-odd
+write_esp 'format=1' 'encrypt=0' 'macos_vm=yes'
+expect_handoff "an install.conf with an unknown macos_vm value"
+[[ ! -e $root/etc/omarchy/macos-vm.enabled ]] || fail "macos_vm=yes writes no marker"
+echo 'ok - macos_vm=1 writes /etc/omarchy/macos-vm.enabled; its absence or another value writes nothing'
+
 # ── format ≠ 1 stays pending ───────────────────────────────────────────────
 new_case bad-format
 write_esp 'format=2' 'encrypt=1'

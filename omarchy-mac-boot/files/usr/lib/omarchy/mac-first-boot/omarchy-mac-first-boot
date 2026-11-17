@@ -23,6 +23,7 @@ keyring_dir=$root/etc/pacman.d/gnupg
 keyring_record=$state_dir/keyring
 keyring_import_dir=$root/usr/share/pacman/keyrings
 image_target=$root/var/lib/omarchy/image/target
+macos_vm_marker=$root/etc/omarchy/macos-vm.enabled
 
 
 say() { printf '%s\n' "$*"; }
@@ -109,7 +110,7 @@ write_atomically() {
 }
 
 parse_install_conf() {
-  local line key value format="" encrypt=""
+  local line key value format="" encrypt="" macos_vm=""
   [[ -f $1 && ! -L $1 ]] || fail "$1 is not a regular file"
   while IFS= read -r line || [[ -n $line ]]; do
     [[ -n $line && $line != \#* ]] || continue
@@ -120,10 +121,28 @@ parse_install_conf() {
       format) format=$value ;;
       encrypt) encrypt=$value ;;
       lane) ;;
+      macos_vm) macos_vm=$value ;;
     esac
   done <"$1"
   [[ $format == 1 ]] || fail "install.conf is not format=1"
   [[ $encrypt == 0 || $encrypt == 1 ]] || fail "install.conf does not set encrypt=0 or encrypt=1"
+  request_macos_vm "$macos_vm"
+}
+
+# The installer's macOS VM tick (macos_vm=1) becomes the marker that
+# omarchy-macos-vm-setup.service starts on. Any other value requests nothing,
+# and never stops first boot.
+request_macos_vm() {
+  case $1 in
+    1)
+      [[ -f $macos_vm_marker ]] && return 0
+      install -d -m 0755 "${macos_vm_marker%/*}" || fail "could not create ${macos_vm_marker%/*}"
+      write_atomically "$macos_vm_marker" 0644 '{"version":1,"requested_by":"installer"}'$'\n'
+      log "install.conf requests the macOS VM stack; wrote $macos_vm_marker"
+      ;;
+    "" | 0) ;;
+    *) log "install.conf sets macos_vm=$1, which is not 0 or 1; no macOS VM requested" ;;
+  esac
 }
 
 # The encrypt hook already read the ESP copy in this boot's initramfs and left
