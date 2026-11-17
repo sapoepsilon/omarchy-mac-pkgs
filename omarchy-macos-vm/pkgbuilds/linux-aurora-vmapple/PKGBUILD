@@ -1,30 +1,26 @@
 # linux-aurora-vmapple: Omarchy's linux-aurora (omacom/omarchy-pkgs
-# pkgbuilds/linux-aurora at _pkgs_commit, its _aurorarel 15) plus the two KVM
-# patches macOS guests need (aquarat/apple-macos-arm64-vm-guest at
-# _guest_commit): Apple PAC VM keys, and emulating one MMIO store XNU makes.
+# pkgbuilds/linux-aurora at _pkgs_commit, linux-aurora commit b798f2b, its
+# _aurorarel 15) plus the two KVM commits macOS guests need, from the owner's
+# fork sapoepsilon/linux-aurora branch vmapple/kvm-macos-guest:
+#   ac4f53c7e704 KVM: arm64: Emulate MMIO load/store-immediate aborts without a syndrome
+#   5cff73a46900 KVM: arm64: Handle Apple PAuth virtualization state under VHE
+# Both are aquarat's, GPL-2.0 (the PAuth one an independent implementation;
+# steelbrain's original is public domain since 2026-11-11, steelbrain#1).
 # A side kernel: its own pkgbase, UKI and Limine entry beside linux-aurora,
-# which stays the default. omvm (sapoepsilon/omvm) builds the same package.
+# which stays the default.
 #
-# PRIVATE BUILD ONLY. linux-7.1.13-vmapple-pac-vmkey.patch is steelbrain's work
-# and has no licence (steelbrain/experiment-macOS-arm64-on-asahi-linux-arm64#1).
-# This recipe downloads it at build time and copies nothing; never publish the
-# built package or a repository or image that carries it.
-#
-# Bumping: copy the new linux-aurora PKGBUILD's _auroraver/_aurorarel/_commit
-# and sha256sums here, move _pkgs_commit to that omarchy-pkgs commit, rebuild.
+# Bumping: rebase vmapple/kvm-macos-guest onto the new linux-aurora pin, move
+# _commit to its tip, copy the new recipe's _auroraver/_aurorarel and sha256sums
+# here and move _pkgs_commit to that omarchy-pkgs commit.
 
 _auroraver=7.2.11
 _aurorarel=15vmapple
 pkgrel=1
 
-# Immutable pin on omacom/linux-aurora (branch integration/aurora). Every bump is a
-# PR that moves _commit; its cold-boot qualification is recorded in
-# the PR's attached qualification evidence before channel publication.
-_commit=b798f2b0c767e3d780896cff2f57e19e412bf954
+# sapoepsilon/linux-aurora vmapple/kvm-macos-guest: integration/aurora b798f2b + the two KVM commits.
+_commit=5cff73a46900a12ede1cea4404da899f21846963
 _pkgs_commit=73931c9b8c728c13cf9348296f1e8bac4dcdcaa9
-_guest_commit=2ec3cb8745e81c368276852b0a2a8688875e5325
 _pkgs=https://raw.githubusercontent.com/omacom/omarchy-pkgs/$_pkgs_commit/pkgbuilds/linux-aurora
-_guest=https://raw.githubusercontent.com/aquarat/apple-macos-arm64-vm-guest/$_guest_commit/patches
 
 # Any m1n1 1.6.1 loads these device trees. The Neo's own Stage 2 comes from the
 # image, so the floor stays where M1 and M2 users' m1n1-aurora already meets it.
@@ -36,7 +32,7 @@ _kernelname=${pkgbase#linux}
 _desc="AArch64 Apple Silicon (Aurora kernel with KVM for macOS guests)"
 pkgver="${_auroraver}.aurora${_aurorarel}"
 arch=('aarch64')
-url="https://github.com/omacom/linux-aurora"
+url="https://github.com/sapoepsilon/linux-aurora/tree/vmapple/kvm-macos-guest"
 license=('GPL2')
 
 makedepends=(
@@ -45,19 +41,15 @@ makedepends=(
 )
 options=('!strip')
 source=("validate-config.py::$_pkgs/validate-config.py" "configure.sh::$_pkgs/configure.sh"
-        "linux::git+https://github.com/omacom/linux-aurora.git#commit=${_commit}"
+        "linux::git+https://github.com/sapoepsilon/linux-aurora.git#commit=${_commit}"
         "rust-toolchain.toml::$_pkgs/rust-toolchain.toml" "bindgen-kernel.py::$_pkgs/bindgen-kernel.py"
-        "config::$_pkgs/config"
-        "vmapple-pac-vmkey.patch::$_guest/linux-7.1.13-vmapple-pac-vmkey.patch"
-        "kvm-nisv-ldst.patch::$_guest/linux-7.1.13-kvm-nisv-ldst.patch")
+        "config::$_pkgs/config")
 sha256sums=('aca7420a18139474da62a81c77fc6e5c3f25001f872b6e11e18605cd892aa4c3'
             'b95c0f0ddf106f3861e0e62a746af6a881fb8e0f356a892961f9e86062877400'
             'SKIP'
             '443a9c4613172ea352f49b114818a1d75ab048ec4bd2d75b388a7ab3a8a1f046'
             '84a03d5fea19cae243c89f50c1736c639622d25d4d1de8d7d53ebd8f603c0f62'
-            '98f76a885d81711013aad47e2ee13f000923191e43321738ec8f381690bf5160'
-            '1930b7761e7028ee8f574590a9a2e192de6775c72628b2b42608fd82665073b4'
-            'f5d34f645112bea2ad7067730833bdf5be906570ed9f3d45f37e6fbc82904e7e')
+            '98f76a885d81711013aad47e2ee13f000923191e43321738ec8f381690bf5160')
 
 # Kbuild takes ARCH literally and knows arm64, not aarch64.
 export ARCH=arm64

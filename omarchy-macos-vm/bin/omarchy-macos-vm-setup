@@ -133,19 +133,11 @@ check_boot() {
   fi
 }
 
-# What omvm itself would set up with sudo: the libvirt hook that hands VM
-# events to the owner's own hook, and the udmabuf limits (omvm's tmpfiles.d).
+# omvm's package ships its libvirt hook (qemu.d/50-omvm), udev rules, sysusers
+# and the udmabuf tmpfiles.d; apply those now rather than at the next boot, and
+# enable the per-user step.
 host_setup() {
-  local hook=$root/etc/libvirt/hooks/qemu
-  if ! grep -qs omvm "$hook"; then
-    install -Dm755 /dev/stdin "$hook" <<'HOOK' || fail "cannot write $hook"
-#!/bin/sh
-# omvm: hand libvirt QEMU events to the per-user hook (session daemons run as the user).
-h="${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
-[ "$(id -u)" != 0 ] && [ -x "$h" ] && exec "$h" "$@"
-exit 0
-HOOK
-  fi
+  systemd-sysusers omvm.conf 2>/dev/null || say "the omvm group appears after the next boot"
   systemd-tmpfiles --create omvm-udmabuf.conf 2>/dev/null || say "udmabuf limits apply after the next boot"
   systemctl --global enable omarchy-macos-vm-user.service ||
     fail "cannot enable omarchy-macos-vm-user.service for users"

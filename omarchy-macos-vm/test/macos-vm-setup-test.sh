@@ -32,6 +32,7 @@ case $1 in
 esac'
 stub systemctl 'echo "systemctl $*" >>"$TEST_CALLS"'
 stub systemd-tmpfiles 'echo "systemd-tmpfiles $*" >>"$TEST_CALLS"'
+stub systemd-sysusers 'echo "systemd-sysusers $*" >>"$TEST_CALLS"'
 stub omvm 'echo "omvm $*" >>"$TEST_CALLS"; echo "The one-time macOS step"'
 stub omarchy-mac-limine-active 'exit 0'
 stub omarchy-mac-boot-update 'echo "boot-update" >>"$TEST_CALLS"; printf "/+Omarchy\n  //linux-aurora\n  //linux-aurora-vmapple\n" >"$OMARCHY_ESP/limine.conf"; mkdir -p "$OMARCHY_ESP/EFI/Linux"; echo uki >"$OMARCHY_ESP/EFI/Linux/omarchy_linux-aurora-vmapple.efi"'
@@ -77,7 +78,7 @@ grep -Fxq boot-update "$calls" || fail "a missing side-kernel entry is built"
 grep -q '^boot-check --boot-chain pending=1' "$calls" || fail "the boot chain is checked"
 grep -q 'systemctl --global enable omarchy-macos-vm-user.service' "$calls" || fail "the user step is enabled"
 grep -q '^omvm macos-step' "$calls" || fail "the macOS step is staged"
-grep -qs omvm "$root/etc/libvirt/hooks/qemu" || fail "the libvirt hook is installed"
+[[ ! -e $root/etc/libvirt/hooks/qemu ]] || fail "the libvirt hook is left to the omvm package"
 grep -q '^package=omvm' "$root/var/lib/omarchy/macos-vm/done" || fail "the done stamp names the packages" "$(cat "$root/var/lib/omarchy/macos-vm/done")"
 grep -q 'systemctl disable omarchy-macos-vm-setup.service' "$calls" || fail "the service disables itself"
 grep -q 'BOOT_ORDER\|kernel default' "$calls" && fail "the default boot entry is never changed"

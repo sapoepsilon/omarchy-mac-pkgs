@@ -20,7 +20,7 @@ Optional keys, for a marker written by hand or by an image builder: `repo` (a di
 
 1. Installs `linux-aurora-vmapple`, `qemu-vmapple`, `mesa-honeykrisp-vmapple` and `omvm`, from the first of: the marker's `repo` directory, `/var/lib/omarchy/macos-vm/repo/`, `/boot/efi/omarchy/macos-vm/repo/`, the marker's `https://` repository (added as `[omarchy-macos-vm]`), or the repositories already configured. Then `virt-manager`, best effort.
 2. Makes sure the side kernel has its UKI (`omarchy_linux-aurora-vmapple.efi`) and Limine entry, running `omarchy-mac-boot-update` once if the kernel's hooks did not, and runs `omarchy-apple-silicon-boot-check --boot-chain` as `omarchy update` does. `linux-aurora` stays the default entry.
-3. Host side: `/etc/libvirt/hooks/qemu` (omvm's hand-off to the user's hook), the udmabuf limits, and `omarchy-macos-vm-user.service` enabled for every user.
+3. Host side: applies what the omvm package ships (its `omvm` group and udmabuf limits; its libvirt hook is `/etc/libvirt/hooks/qemu.d/50-omvm`) and enables `omarchy-macos-vm-user.service` for every user.
 4. Stages the one-time macOS step (`omvm macos-step`) and writes what is next to `/var/lib/omarchy/macos-vm/next-steps.txt`.
 5. Writes `/var/lib/omarchy/macos-vm/done` with the installed versions and disables itself.
 
@@ -30,7 +30,7 @@ It never downloads Apple software, never creates a guest (that needs the macOS s
 
 ## Recipes
 
-`pkgbuilds/` holds the recipes for the stack and for this package; [BUILD.md](../BUILD.md) has the commands. `linux-aurora-vmapple` applies steelbrain's unlicensed PAC patch: its package, and any repository or image that carries it, stays private.
+`pkgbuilds/` holds the recipes for the stack and for this package; [BUILD.md](../BUILD.md) has the commands. `linux-aurora-vmapple` builds the owner's fork branch `sapoepsilon/linux-aurora` `vmapple/kvm-macos-guest`, whose two KVM commits are GPL-2.0.
 
 ## Tests
 

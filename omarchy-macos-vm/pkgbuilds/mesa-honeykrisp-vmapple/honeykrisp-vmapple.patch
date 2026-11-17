@@ -1,0 +1,108 @@
+Honeykrisp for omvm: the tree ~/opt/mesa-honeykrisp-sb runs (mesa-26.2.6 +
+aquarat patches/mesa 0001-0002, 16-bit varyings, + omvm patches/graphics/mesa
+0003, VK_EXT_fragment_shader_interlock), as one diff, taken 2026-11-17.
+
+diff --git c/src/asahi/compiler/agx_compile.c w/src/asahi/compiler/agx_compile.c
+index e131bcf0721..6d6a5f3d792 100644
+--- c/src/asahi/compiler/agx_compile.c
++++ w/src/asahi/compiler/agx_compile.c
+@@ -1603,6 +1603,10 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
+       return NULL;
+    }
+ 
++   case nir_intrinsic_end_invocation_interlock:
++      /* The pixel is released when the fragment ends (local). */
++      return NULL;
++
+    case nir_intrinsic_ddx:
+    case nir_intrinsic_ddx_coarse:
+    case nir_intrinsic_ddx_fine:
+diff --git c/src/asahi/compiler/agx_nir_lower_interpolation.c w/src/asahi/compiler/agx_nir_lower_interpolation.c
+index 8280a374cf0..6c6f318a114 100644
+--- c/src/asahi/compiler/agx_nir_lower_interpolation.c
++++ w/src/asahi/compiler/agx_nir_lower_interpolation.c
+@@ -129,12 +129,25 @@ interpolate_channel(nir_builder *b, nir_intrinsic_instr *load, unsigned channel)
+       .io_semantics = nir_intrinsic_io_semantics(load));
+ 
+    if (load->intrinsic == nir_intrinsic_load_input) {
+-      assert(load->def.bit_size == 32);
+-
+       if (nir_intrinsic_io_semantics(load).location == VARYING_SLOT_LAYER)
+-         return nir_load_layer_id(b);
++         return nir_u2uN(b, nir_load_layer_id(b), load->def.bit_size);
++
++      /* The coefficient registers hold 32-bit varyings: the vertex side
++       * widens 16-bit outputs by type before st_vary (agx_nir_lower_uvs).
++       * A 16-bit flat input (e.g. a SPIR-V Float16 varying decorated Flat)
++       * therefore reads a 32-bit value and must narrow it by its type, as
++       * the interpolated path below does with f2fN. Returning the 32-bit
++       * value for a 16-bit load left a mismatched def that the backend
++       * later failed to pack ("unaligned reg"), aborting the compile.
++       */
++      nir_def *flat = interpolate_flat(b, coefficients);
++      if (load->def.bit_size == 32)
++         return flat;
++      else if (nir_alu_type_get_base_type(nir_intrinsic_dest_type(load)) ==
++               nir_type_float)
++         return nir_f2fN(b, flat, load->def.bit_size);
+       else
+-         return interpolate_flat(b, coefficients);
++         return nir_u2uN(b, flat, load->def.bit_size);
+    } else {
+       nir_intrinsic_instr *bary = nir_src_as_intrinsic(load->src[0]);
+ 
+diff --git c/src/asahi/lib/agx_nir_lower_uvs.c w/src/asahi/lib/agx_nir_lower_uvs.c
+index 75d3c0d00ca..ce6b9b15980 100644
+--- c/src/asahi/lib/agx_nir_lower_uvs.c
++++ w/src/asahi/lib/agx_nir_lower_uvs.c
+@@ -64,6 +64,25 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+    nir_def *value = intr->src[0].ssa;
+    nir_def *offset = intr->src[1].ssa;
+ 
++   /* UVS slots are 32-bit (st_vary only takes 32-bit sources), and the
++    * fragment shader reads varyings as 32-bit and converts after
++    * interpolation (agx_nir_lower_interpolation). Widen 16-bit outputs
++    * (e.g. half varyings from SPIR-V Float16) according to their type.
++    */
++   if (value->bit_size == 16) {
++      switch (nir_alu_type_get_base_type(nir_intrinsic_src_type(intr))) {
++      case nir_type_float:
++         value = nir_f2f32(b, value);
++         break;
++      case nir_type_int:
++         value = nir_i2i32(b, value);
++         break;
++      default:
++         value = nir_u2u32(b, value);
++         break;
++      }
++   }
++
+    /* If there is only 1 user varying, it is at the base of the varying section.
+     * This saves us an indirection on simple separate shaders.
+     */
+diff --git c/src/asahi/vulkan/hk_physical_device.c w/src/asahi/vulkan/hk_physical_device.c
+index cc5fd0f6a8e..de45912db20 100644
+--- c/src/asahi/vulkan/hk_physical_device.c
++++ w/src/asahi/vulkan/hk_physical_device.c
+@@ -162,6 +162,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
+       .EXT_extended_dynamic_state2 = true,
+       .EXT_extended_dynamic_state3 = true,
+       .EXT_external_memory_dma_buf = true,
++      .EXT_fragment_shader_interlock = true,
+       .EXT_global_priority = true,
+       .EXT_global_priority_query = true,
+       .EXT_graphics_pipeline_library = true,
+@@ -546,6 +547,12 @@ hk_get_device_features(
+       .extendedDynamicState3RepresentativeFragmentTestEnable = false,
+       .extendedDynamicState3ShadingRateImageEnable = false,
+ 
++      /* VK_EXT_fragment_shader_interlock (local: wait_pix orders a pixel's
++       * fragments, as the gallium driver's spilled render targets rely on) */
++      .fragmentShaderSampleInterlock = false,
++      .fragmentShaderPixelInterlock = true,
++      .fragmentShaderShadingRateInterlock = false,
++
+       /* VK_EXT_graphics_pipeline_library */
+       .graphicsPipelineLibrary = true,
+ 
