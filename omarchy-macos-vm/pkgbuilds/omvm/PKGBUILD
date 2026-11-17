@@ -1,0 +1,35 @@
+# omvm: the owner's macOS-guest tool (sapoepsilon/omvm), pinned to its macos-vm
+# branch, which finds qemu-vmapple and mesa-honeykrisp-vmapple. Its own
+# packaging/aur/PKGBUILD installs the same tree. GPL-2.0-or-later; it ships no
+# Apple software and fetches the guest harness per user (omvm prepare).
+
+pkgname=omvm
+pkgver=0.1.0.r928f70c
+pkgrel=1
+pkgdesc="Run macOS guest VMs under KVM on Omarchy (Apple Silicon); ships no Apple software"
+arch=('any')
+url="https://github.com/sapoepsilon/omvm"
+license=('GPL-2.0-or-later')
+depends=(bash git python openssh gdb socat zstd exfatprogs qemu-img libvirt
+         qemu-vmapple mesa-honeykrisp-vmapple)
+optdepends=('linux-aurora-vmapple: the KVM patches a macOS guest needs (boot it to run guests)'
+            'virt-manager: manage omvm virt VMs'
+            'python-gobject: omvm-gui' 'gtk4: omvm-gui' 'libadwaita: omvm-gui'
+            'tigervnc: vncviewer for remote-mode VMs' 'wl-clipboard: clipboard sharing')
+_commit=928f70c0b42bb3d6623975151cb38c2a3c3884c4
+source=("omvm::git+https://github.com/sapoepsilon/omvm.git#commit=$_commit")
+sha256sums=('SKIP')
+
+package() {
+  cd omvm
+  install -Dm755 -t "$pkgdir/usr/lib/omvm/bin" bin/omvm bin/omvm-gui
+  install -d "$pkgdir/usr/lib/omvm"
+  cp -r share "$pkgdir/usr/lib/omvm/share"
+  install -d "$pkgdir/usr/bin"
+  ln -s /usr/lib/omvm/bin/omvm "$pkgdir/usr/bin/omvm"
+  ln -s /usr/lib/omvm/bin/omvm-gui "$pkgdir/usr/bin/omvm-gui"
+  printf 'w /sys/module/udmabuf/parameters/list_limit - - - - 262144\nw /sys/module/udmabuf/parameters/size_limit_mb - - - - 4096\n' |
+    install -Dm644 /dev/stdin "$pkgdir/usr/lib/tmpfiles.d/omvm-udmabuf.conf"
+  install -Dm644 -t "$pkgdir/usr/share/doc/omvm" README.md AGENTS.md LICENSING.md docs/*.md
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

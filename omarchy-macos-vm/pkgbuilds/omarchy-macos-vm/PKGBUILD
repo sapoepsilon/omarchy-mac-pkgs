@@ -1,0 +1,23 @@
+# omarchy-macos-vm: the first-boot hook only (omarchy-macos-vm-setup.service and
+# the per-user omarchy-macos-vm-user.service). Small and free of the PAC patch,
+# so it can sit in any image; it does nothing until
+# /etc/omarchy/macos-vm.enabled exists, then installs the heavy packages.
+
+pkgname=omarchy-macos-vm
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Omarchy Mac: install the macOS VM stack (omvm) when the installer asked for it"
+arch=('any')
+url="https://github.com/sapoepsilon/omarchy-mac-pkgs/tree/macos-vm/omarchy-macos-vm"
+license=('MIT')
+depends=(bash python systemd pacman)
+# Local builds: makepkg -p from this directory takes the package from the
+# checkout two levels up (OMARCHY_MACOS_VM_SRC overrides).
+source=()
+sha256sums=()
+
+package() {
+  local src=${OMARCHY_MACOS_VM_SRC:-$startdir/../..}
+  [[ -x $src/install ]] || { echo "no omarchy-macos-vm checkout at $src" >&2; return 1; }
+  "$src/install" "$pkgdir"
+}

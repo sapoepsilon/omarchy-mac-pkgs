@@ -1,0 +1,14 @@
+# Once per user, after omarchy-macos-vm-setup.service: omvm's SSH key, guest
+# harness checkout and settings (omvm prepare).
+[Unit]
+Description=Omarchy: prepare omvm for this user
+ConditionPathExists=/var/lib/omarchy/macos-vm/done
+ConditionPathExists=!%h/.local/state/omarchy-macos-vm/done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/omarchy-macos-vm/omarchy-macos-vm-user-setup
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=default.target

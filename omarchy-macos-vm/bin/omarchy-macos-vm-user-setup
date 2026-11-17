@@ -1,0 +1,18 @@
+#!/bin/bash
+
+# omarchy-macos-vm-user.service: once per user, after the system step is done,
+# prepare omvm for this user: its SSH key, the pinned guest harness checkout and
+# ~/.config/omvm/gui.env. No guest is created: that needs the macOS step first.
+
+set -uo pipefail
+
+state=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-macos-vm
+mkdir -p "$state"
+if omvm prepare; then
+  omvm doctor || echo "omarchy-macos-vm-user-setup: omvm doctor lists what is still to do" >&2
+  date -u +%FT%TZ >"$state/done"
+  echo "omarchy-macos-vm-user-setup: omvm is ready; next steps: /var/lib/omarchy/macos-vm/next-steps.txt"
+else
+  echo "omarchy-macos-vm-user-setup: omvm prepare failed; it runs again at the next login" >&2
+  exit 1
+fi

@@ -1,0 +1,20 @@
+# Installs the macOS VM stack when the installer asked for it: install.conf's
+# macos_vm=1 becomes /etc/omarchy/macos-vm.enabled at first boot. Runs after
+# first boot, retries on every boot until it is done, then disables itself.
+[Unit]
+Description=Omarchy: install the macOS VM stack (omvm) requested at install
+ConditionPathExists=/etc/omarchy/macos-vm.enabled
+ConditionPathExists=!/var/lib/omarchy/macos-vm/done
+Wants=network-online.target
+After=network-online.target omarchy-mac-first-boot.service
+
+[Service]
+Type=oneshot
+Environment=PATH=/usr/share/omarchy/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+ExecStart=/usr/lib/omarchy-macos-vm/omarchy-macos-vm-setup
+TimeoutStartSec=1h
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

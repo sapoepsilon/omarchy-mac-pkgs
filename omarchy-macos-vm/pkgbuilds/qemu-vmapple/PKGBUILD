@@ -1,0 +1,66 @@
+# qemu-vmapple: QEMU with the vmapple machine on KVM (Asahi) and the
+# reims-vgpu paravirtual GPU (Metal to Vulkan on Honeykrisp), as omvm's
+# docs/graphics.md builds it: steelbrain/qemu-reims-vgpu plus omvm's
+# patches/graphics/qemu 0001-0007 and patches/usb 0001 (the owner's
+# build/qemu-sb-bdifw), linked to steelbrain/reims-vgpu + metal2vulkan with
+# omvm's patches. Everything lives under /usr/lib/qemu-vmapple, in the
+# build-tree layout omvm expects (qemu-system-aarch64 beside qemu-bundle/), so
+# it never conflicts with Arch's qemu. GPL-2.0-or-later; ships no Apple files.
+
+pkgname=qemu-vmapple
+pkgver=10.1.50.r1b41f5f5
+pkgrel=1
+pkgdesc="QEMU vmapple machine on KVM with the reims-vgpu GPU, for omvm's macOS guests"
+arch=('aarch64')
+url="https://github.com/sapoepsilon/omvm"
+license=('GPL-2.0-or-later' 'LGPL-3.0-or-later')
+depends=(glib2 pixman gtk3 vulkan-icd-loader libslirp dtc zlib libepoxy wayland libxkbcommon
+         gnutls nettle libpipewire sdl3)
+makedepends=(git rustup ninja meson python python-distlib vulkan-headers clang lld pkgconf)
+options=('!strip' '!lto')
+_qemu_commit=1b41f5f5db4d1067d023973b9bd74c7b341e0d28
+_reims_commit=1fe0acb68b287db36f1e6c7b9f45383940b8a76f
+_m2v_commit=219f01365dc4c8eb346816c405b5b17403793764
+# The omvm commit whose patches/ this build applies (bump with omvm).
+_omvm_commit=e75eff0074e4c1937530d65d2b948fda965d0b95
+source=("qemu::git+https://github.com/steelbrain/qemu-reims-vgpu.git#commit=$_qemu_commit"
+        "reims::git+https://github.com/steelbrain/reims-vgpu.git#commit=$_reims_commit"
+        "metal2vulkan::git+https://github.com/steelbrain/metal2vulkan.git#commit=$_m2v_commit"
+        "omvm::git+https://github.com/sapoepsilon/omvm.git#commit=$_omvm_commit")
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+_prefix=/usr/lib/qemu-vmapple
+
+prepare() {
+  local patches=$srcdir/omvm/patches
+  git -C reims -c user.name=makepkg -c user.email=makepkg@localhost am -q "$patches"/graphics/reims-vgpu/*.patch
+  git -C metal2vulkan -c user.name=makepkg -c user.email=makepkg@localhost am -q "$patches"/graphics/metal2vulkan/*.patch
+  git -C qemu -c user.name=makepkg -c user.email=makepkg@localhost am -q "$patches"/graphics/qemu/*.patch "$patches"/usb/*.patch
+  # reims-vgpu pins its own toolchain (rust-toolchain.toml); fetch it and the crates now.
+  (cd reims && rustup show active-toolchain >/dev/null && cargo fetch --locked)
+}
+
+build() {
+  # LSE atomics: reims-vgpu needs target-cpu=native on aarch64 Linux (docs/graphics.md).
+  (cd reims && CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C target-cpu=native" \
+    cargo xtask dist --out "$srcdir/reims-dist")
+  mkdir -p qemu/build
+  cd qemu/build
+  PKG_CONFIG_PATH="$srcdir/reims-dist/lib/pkgconfig" ../configure \
+    --target-list=aarch64-softmmu --enable-kvm --enable-pvg --enable-gnutls --enable-vnc \
+    --disable-docs --disable-werror --extra-ldflags="-Wl,-rpath,$_prefix/lib"
+  # No target: qemu-system-aarch64 alone skips pc-bios/keymaps, and QEMU then refuses to start.
+  ninja
+}
+
+package() {
+  install -Dm755 qemu/build/qemu-system-aarch64 "$pkgdir$_prefix/qemu-system-aarch64"
+  cp -a qemu/build/qemu-bundle "$pkgdir$_prefix/qemu-bundle"
+  # The bundle's own binaries duplicate the one above; omvm passes -L to its data.
+  rm -rf "$pkgdir$_prefix/qemu-bundle/usr/local/bin"
+  install -Dm755 reims-dist/lib/libreims_vgpu.so "$pkgdir$_prefix/lib/libreims_vgpu.so"
+  install -Dm644 -t "$pkgdir$_prefix/share/reims-vgpu" reims-dist/share/reims-vgpu/*
+  # The option ROM next to QEMU's firmware too, where -L finds romfiles.
+  install -Dm644 -t "$pkgdir$_prefix/qemu-bundle/usr/local/share/qemu" reims-dist/share/reims-vgpu/*.rom
+  install -Dm644 qemu/COPYING "$pkgdir/usr/share/licenses/$pkgname/COPYING"
+  install -Dm644 reims/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE.reims-vgpu"
+}

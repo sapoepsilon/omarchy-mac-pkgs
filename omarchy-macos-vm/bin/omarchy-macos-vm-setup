@@ -1,0 +1,185 @@
+#!/bin/bash
+
+# omarchy-macos-vm-setup.service: once /etc/omarchy/macos-vm.enabled exists,
+# install the macOS VM stack (linux-aurora-vmapple, qemu-vmapple,
+# mesa-honeykrisp-vmapple, omvm), give the side kernel its UKI and Limine
+# entry, set up the host side omvm needs, and stage the one-time macOS step.
+# It never downloads Apple software, never changes the default boot entry, and
+# never touches the stock kernel. Idempotent: every step checks before it acts,
+# and a failure leaves the done stamp unwritten, so the next boot retries.
+#
+# The marker is JSON, {"version":1,"requested_by":"installer"}, written by
+# omarchy-mac-first-boot from install.conf's macos_vm=1. Optional keys:
+# "repo" (a directory of packages, or an https:// pacman repository) and
+# "user" (the owner the per-user step is for).
+
+set -uo pipefail
+
+root=${OMARCHY_MACOS_VM_ROOT:-}
+marker=$root/etc/omarchy/macos-vm.enabled
+state_dir=$root/var/lib/omarchy/macos-vm
+done_stamp=$state_dir/done
+next_steps=$state_dir/next-steps.txt
+esp=${OMARCHY_ESP:-/boot/efi}
+packages=(linux-aurora-vmapple qemu-vmapple mesa-honeykrisp-vmapple omvm)
+optional_packages=(virt-manager)
+side_kernel=linux-aurora-vmapple
+
+say() { printf 'omarchy-macos-vm-setup: %s\n' "$*"; }
+fail() {
+  say "$*" >&2
+  mkdir -p "$state_dir" && printf '%s\n' "$*" >"$state_dir/last-error"
+  exit 1
+}
+
+# A key of the marker's JSON, or nothing. A marker that is not JSON (an empty
+# file a person touched) still requests the stack, with no options.
+marker_value() {
+  python3 -I -c 'import json, sys
+try:
+    value = json.load(open(sys.argv[1])).get(sys.argv[2], "")
+except Exception:
+    value = ""
+print(value if isinstance(value, str) else "")' "$marker" "$1" 2>/dev/null || true
+}
+
+wait_for_pacman() {
+  local tries=0
+  while [[ -e $root/var/lib/pacman/db.lck ]]; do
+    (( tries++ < 120 )) || fail "pacman's lock /var/lib/pacman/db.lck stayed for 10 minutes"
+    sleep 5
+  done
+}
+
+is_installed() { pacman -Q "$1" >/dev/null 2>&1; }
+
+all_installed() {
+  local package
+  for package in "${packages[@]}"; do
+    is_installed "$package" || return 1
+  done
+}
+
+# The newest archive of each package in a directory of packages.
+archives_in() {
+  local dir=$1 package file newest
+  for package in "${packages[@]}"; do
+    newest=""
+    for file in "$dir/$package"-[0-9]*.pkg.tar.*; do
+      [[ -f $file && $file != *.sig ]] || continue
+      # Only this package's own archives: linux-aurora-vmapple-headers is not one.
+      [[ $(basename "$file") =~ ^$package-[^-]+-[^-]+-[^-]+\.pkg\.tar\.[a-z0-9]+$ ]] || continue
+      newest=$file
+    done
+    [[ -n $newest ]] || return 1
+    printf '%s\n' "$newest"
+  done
+}
+
+add_repository() {
+  local url=$1 conf=$root/etc/pacman.d/omarchy-macos-vm.conf
+  [[ $url =~ ^https://[A-Za-z0-9._~:/%@+-]+$ ]] || fail "the marker's repo $url is not an https:// URL"
+  # The owner's own private repository, built on their own Mac (BUILD.md).
+  mkdir -p "${conf%/*}" || fail "cannot create ${conf%/*}"
+  printf '[omarchy-macos-vm]\nSigLevel = Optional TrustAll\nServer = %s\n' "$url" >"$conf" ||
+    fail "cannot write $conf"
+  grep -Fqx "Include = /etc/pacman.d/omarchy-macos-vm.conf" "$root/etc/pacman.conf" ||
+    printf '\nInclude = /etc/pacman.d/omarchy-macos-vm.conf\n' >>"$root/etc/pacman.conf" ||
+    fail "cannot add the omarchy-macos-vm repository to /etc/pacman.conf"
+}
+
+install_stack() {
+  local repo dir
+  local -a archives=()
+  all_installed && { say "the macOS VM packages are installed"; return 0; }
+  repo=$(marker_value repo)
+  for dir in "$repo" "$state_dir/repo" "$esp/omarchy/macos-vm/repo"; do
+    [[ -n $dir && $dir != https://* && -d $dir ]] || continue
+    mapfile -t archives < <(archives_in "$dir") || true
+    (( ${#archives[@]} == ${#packages[@]} )) && break
+    archives=()
+  done
+  wait_for_pacman
+  if (( ${#archives[@]} )); then
+    say "installing ${archives[*]##*/}"
+    pacman -U --needed --noconfirm "${archives[@]}" || fail "pacman -U failed"
+  else
+    if [[ $repo == https://* ]]; then
+      add_repository "$repo"
+      pacman -Sy --noconfirm || fail "cannot refresh the package databases"
+    fi
+    pacman -S --needed --noconfirm "${packages[@]}" ||
+      fail "the macOS VM packages are in no package directory and no repository (see BUILD.md)"
+  fi
+  pacman -S --needed --noconfirm "${optional_packages[@]}" ||
+    say "could not install ${optional_packages[*]}; omvm works without it"
+}
+
+# The kernel's pacman hooks build its initramfs and, on a Limine Mac, its UKI
+# and menu entry. Rebuild once if they did not, then hold the stock boot chain
+# to the same check omarchy update does.
+check_boot() {
+  local conf=$esp/limine.conf
+  if omarchy-mac-limine-active 2>/dev/null; then
+    if ! grep -Fq "//$side_kernel" "$conf" 2>/dev/null || [[ ! -s $esp/EFI/Linux/omarchy_$side_kernel.efi ]]; then
+      say "building the $side_kernel UKI and Limine entry"
+      omarchy-mac-boot-update || fail "omarchy-mac-boot-update failed"
+    fi
+    grep -Fq "//$side_kernel" "$conf" || fail "$conf has no $side_kernel entry"
+  fi
+  if command -v omarchy-apple-silicon-boot-check >/dev/null; then
+    OMARCHY_BOOT_CHECK_ALLOW_PENDING_REBOOT=1 omarchy-apple-silicon-boot-check --boot-chain ||
+      fail "the boot check fails with $side_kernel installed; the stock kernel's boot files need attention"
+  fi
+}
+
+# What omvm itself would set up with sudo: the libvirt hook that hands VM
+# events to the owner's own hook, and the udmabuf limits (omvm's tmpfiles.d).
+host_setup() {
+  local hook=$root/etc/libvirt/hooks/qemu
+  if ! grep -qs omvm "$hook"; then
+    install -Dm755 /dev/stdin "$hook" <<'HOOK' || fail "cannot write $hook"
+#!/bin/sh
+# omvm: hand libvirt QEMU events to the per-user hook (session daemons run as the user).
+h="${XDG_CONFIG_HOME:-$HOME/.config}/libvirt/hooks/qemu"
+[ "$(id -u)" != 0 ] && [ -x "$h" ] && exec "$h" "$@"
+exit 0
+HOOK
+  fi
+  systemd-tmpfiles --create omvm-udmabuf.conf 2>/dev/null || say "udmabuf limits apply after the next boot"
+  systemctl --global enable omarchy-macos-vm-user.service ||
+    fail "cannot enable omarchy-macos-vm-user.service for users"
+}
+
+# The macOS step needs the owner at the Mac; stage it and say what is next.
+stage_macos_step() {
+  omvm macos-step >"$next_steps" 2>&1 || fail "omvm macos-step failed: $(tail -n 1 "$next_steps")"
+  {
+    printf '\nBefore the macOS step, boot "%s" once from the Limine menu to try it;\n' "$side_kernel"
+    printf 'after it: omvm ingest && omvm setup --xcode (on %s), then omvm virt macos.\n' "$side_kernel"
+  } >>"$next_steps"
+  say "next steps for the owner are in $next_steps"
+}
+
+main() {
+  [[ -e $marker ]] || { say "no $marker; nothing to do"; return 0; }
+  [[ ! -e $done_stamp ]] || { say "already done ($done_stamp)"; return 0; }
+  mkdir -p "$state_dir" || fail "cannot create $state_dir"
+  if [[ ${OMARCHY_MACOS_VM_SKIP_HW:-0} != 1 ]]; then
+    grep -qs 'apple,arm-platform' "$root/proc/device-tree/compatible" || fail "not an Apple Silicon Mac"
+    [[ $(getconf PAGESIZE) == 16384 ]] || fail "omvm needs a 16K-page kernel"
+  fi
+  install_stack
+  check_boot
+  host_setup
+  stage_macos_step
+  {
+    printf 'done=%s\n' "$(date -u +%FT%TZ)"
+    pacman -Q "${packages[@]}" 2>/dev/null | sed 's/^/package=/'
+  } >"$done_stamp.new" && mv -f "$done_stamp.new" "$done_stamp" || fail "cannot write $done_stamp"
+  rm -f "$state_dir/last-error"
+  systemctl disable omarchy-macos-vm-setup.service >/dev/null 2>&1 || true
+  say "the macOS VM stack is installed; $side_kernel is in the boot menu, the stock kernel stays the default"
+}
+
+main "$@"
