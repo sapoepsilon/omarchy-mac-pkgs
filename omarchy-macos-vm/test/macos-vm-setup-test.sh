@@ -118,3 +118,16 @@ for unit in "$package"/files/usr/lib/systemd/system/*.service; do
   grep -Fq 'ConditionPathExists=/etc/omarchy/macos-vm.enabled' "$unit" || fail "$unit is gated on the marker"
 done
 pass "the system unit is gated on /etc/omarchy/macos-vm.enabled"
+
+user_setup=$package/bin/omarchy-macos-vm-user-setup
+user_home=$test_tmp/home
+: >"$calls"
+stub omarchy-macos-vm 'exit 0'
+env -u XDG_STATE_HOME -u XDG_DATA_HOME HOME="$user_home" TEST_CALLS="$calls" PATH="$stub_bin:$PATH" \
+  bash "$user_setup" >"$test_tmp/out" 2>&1 || fail "the user step succeeds" "$(cat "$test_tmp/out")"
+entry=$user_home/.local/share/applications/macos-vm.desktop
+grep -Fxq 'Name=macOS' "$entry" && grep -Fxq 'Exec=uwsm app -- omarchy-macos-vm launch' "$entry" ||
+  fail "the user step adds the macOS launcher entry" "$(cat "$entry" 2>&1)"
+grep -q '^omvm prepare' "$calls" && [[ -s $user_home/.local/state/omarchy-macos-vm/done ]] ||
+  fail "the user step prepares omvm" "$(cat "$calls")"
+pass "the user step adds the macOS launcher entry and prepares omvm"

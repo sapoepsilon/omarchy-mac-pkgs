@@ -24,7 +24,7 @@ Optional keys, for a marker written by hand or by an image builder: `repo` (a di
 4. Stages the one-time macOS step (`omvm macos-step`) and writes what is next to `/var/lib/omarchy/macos-vm/next-steps.txt`.
 5. Writes `/var/lib/omarchy/macos-vm/done` with the installed versions and disables itself.
 
-Any failure is logged to the journal (`journalctl -u omarchy-macos-vm-setup`) and `/var/lib/omarchy/macos-vm/last-error`, leaves no done stamp, and the next boot retries. At each user's first login after that, `omarchy-macos-vm-user.service` runs `omvm prepare` (SSH key, the pinned guest harness, `~/.config/omvm/gui.env`) and `omvm doctor`.
+Any failure is logged to the journal (`journalctl -u omarchy-macos-vm-setup`) and `/var/lib/omarchy/macos-vm/last-error`, leaves no done stamp, and the next boot retries. At each user's first login after that, `omarchy-macos-vm-user.service` adds the "macOS" launcher entry (`~/.local/share/applications/macos-vm.desktop`, running `omarchy-macos-vm launch`) and runs `omvm prepare` (SSH key, the pinned guest harness, `~/.config/omvm/gui.env`) and `omvm doctor`.
 
 It never downloads Apple software, never creates a guest (that needs the macOS step) and never changes the default boot entry.
 
