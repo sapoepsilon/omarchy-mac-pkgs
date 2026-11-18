@@ -21,14 +21,18 @@ Optional keys, for a marker written by hand or by an image builder: `repo` (a di
 1. Installs `linux-aurora-vmapple`, `qemu-vmapple`, `mesa-honeykrisp-vmapple` and `omvm`, from the first of: the marker's `repo` directory, `/var/lib/omarchy/macos-vm/repo/`, `/boot/efi/omarchy/macos-vm/repo/`, the marker's `https://` repository (added as `[omarchy-macos-vm]`), or the repositories already configured. Then `virt-manager`, best effort.
 2. Makes sure the side kernel has its UKI (`omarchy_linux-aurora-vmapple.efi`) and Limine entry, running `omarchy-mac-boot-update` once if the kernel's hooks did not, and runs `omarchy-apple-silicon-boot-check --boot-chain` as `omarchy update` does. `linux-aurora` stays the default entry.
 3. Host side: applies what the omvm package ships (its `omvm` group and udmabuf limits; its libvirt hook is `/etc/libvirt/hooks/qemu.d/50-omvm`) and enables `omarchy-macos-vm-user.service` for every user.
-4. Stages the one-time macOS step (`omvm macos-step`) and writes what is next to `/var/lib/omarchy/macos-vm/next-steps.txt`.
-5. Writes `/var/lib/omarchy/macos-vm/done` with the installed versions and disables itself.
+4. Writes what is next to `/var/lib/omarchy/macos-vm/next-steps.txt`: when VMXFER already holds the restored VM (the developer installer's "Set up a macOS VM" step makes it on macOS before the first boot), one login and one restart; otherwise it stages the one-time macOS step (`omvm macos-step`).
+5. Writes `/var/lib/omarchy/macos-vm/done` with the installed versions, disables itself and starts `omarchy-macos-vm-vmxfer.service` right away.
 
 Any failure is logged to the journal (`journalctl -u omarchy-macos-vm-setup`) and `/var/lib/omarchy/macos-vm/last-error`, leaves no done stamp, and the next boot retries. At each user's first login after that, `omarchy-macos-vm-user.service` adds the "macOS" launcher entry (`~/.local/share/applications/macos-vm.desktop`, running `omarchy-macos-vm launch`) and runs `omvm prepare` (SSH key, the pinned guest harness, `~/.config/omvm/gui.env`) and `omvm doctor`.
 
-After the macOS step the rest is automatic. `omarchy-macos-vm-vmxfer.service` (root, every boot once the stack is installed, and on demand from `omarchy-macos-vm install`) mounts VMXFER read-only and writes `/var/lib/omarchy/macos-vm/vmxfer-ready` when the restored VM (`vmxfer.sha256` and the restore bundle) is on it. At each graphical login until the VM exists, `omarchy-macos-vm-create.service` (user) then opens a terminal running `omarchy-macos-vm create` (`omvm ingest`, `omvm setup [--xcode]`, `omvm virt macos` with the RAM and cores chosen at install); after the import on the stock kernel it only asks, in a notification, to boot `linux-aurora-vmapple`, which `omvm setup` needs.
+Once the restored VM is on VMXFER the rest is automatic; the owner only restarts once:
 
-The stack setup itself never downloads Apple software, never creates a guest (that needs the macOS step) and never changes the default boot entry.
+- `omarchy-macos-vm-vmxfer.service` (root; every boot once the stack is installed, right after the setup, and from `omarchy-macos-vm install`) writes `/var/lib/omarchy/macos-vm/vmxfer-ready` when `vmxfer.sha256` and the restore bundle are on VMXFER, keeps VMXFER mounted read-only at `/run/omarchy-macos-vm/vmxfer` (the stamp's `mount=`) so `omvm ingest` needs no sudo password, and arms one boot of `linux-aurora-vmapple` (`omarchy-macos-vm-oneshot-boot arm`: limine.conf's `default_entry` points at it, the old value is kept; at most two tries).
+- `omarchy-macos-vm-oneshot-restore.service` (root, early on the next boot, whichever kernel started) puts `default_entry` back, so `linux-aurora` stays the default.
+- At each graphical login until the VM exists, `omarchy-macos-vm-create.service` (user) starts `omarchy-macos-vm create --auto` in the background (transient unit `omarchy-macos-vm-creating`): `omvm ingest`, then on `linux-aurora-vmapple` (which `omvm setup` needs) `omvm setup` and `omvm virt macos`, choosing the guest account (this user), RAM and cores unless `omarchy-macos-vm install` already did. On the stock kernel it stops after the import and a notification asks for the restart. The "macOS" launcher entry then opens the VM.
+
+The stack setup itself never downloads Apple software and never creates a guest (that needs the macOS side). The default boot entry changes only for the one armed boot.
 
 ## Recipes
 

@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # omarchy-macos-vm-create.service: at each graphical login until the macOS VM
-# exists. Once the one-time macOS step has left the restored VM on VMXFER (or
-# omvm ingest already imported it), open a terminal that runs
-# `omarchy-macos-vm create` (ingest, setup, virt: it may ask for the sudo
-# password to mount VMXFER and takes 10-40 minutes, so it runs where the owner
-# can see it). On the stock kernel, after the import, only a notification:
-# omvm setup needs linux-aurora-vmapple booted.
+# exists. Once the restored VM is on VMXFER (or omvm ingest already imported
+# it), run `omarchy-macos-vm create --auto` in the background, as a transient
+# user unit: it imports the VM, and on linux-aurora-vmapple sets it up and
+# defines it, telling the owner in notifications. On the stock kernel it stops
+# after the import and asks for one restart (the side kernel is armed to boot
+# once by itself). Its log: journalctl --user -u omarchy-macos-vm-creating.
 
 set -uo pipefail
 
@@ -15,6 +15,7 @@ images=${OMVM_IMAGES:-${XDG_DATA_HOME:-$HOME/.local/share}/omvm/images}
 created=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-macos-vm/vm-created
 side_kernel_param=${OMARCHY_MACOS_VM_KVM_PARAM:-/sys/module/kvm/parameters/emulate_nisv_ldst}
 vm_name=${OMVM_VM:-macos}
+unit=omarchy-macos-vm-creating
 
 notify() { omarchy-notification-send "$@" 2>/dev/null || notify-send "$@" 2>/dev/null || true; }
 
@@ -30,20 +31,26 @@ if ((!ingested)) && [[ ! -e $state_dir/vmxfer-ready ]]; then
 fi
 
 if ((ingested)) && [[ ! -e $side_kernel_param ]]; then
-  notify -u critical "macOS VM: reboot to finish" \
-    "Boot linux-aurora-vmapple from the Limine menu; the VM is finished at the next login."
+  if [[ -e $state_dir/oneshot-armed ]]; then
+    notify -u critical "macOS VM: restart to finish" \
+      "Restart once: Omarchy starts linux-aurora-vmapple by itself and finishes the VM at the next login."
+  else
+    notify -u critical "macOS VM: restart to finish" \
+      "Boot linux-aurora-vmapple from the Limine menu; the VM is finished at the next login."
+  fi
   exit 0
 fi
 
 if ! command -v omarchy-macos-vm >/dev/null; then
   notify -u critical -t 0 "macOS VM: finish it" \
-    "In a terminal: omvm ingest && omvm setup --xcode && omvm virt $vm_name"
+    "In a terminal: omvm ingest && omvm setup && omvm virt $vm_name"
   exit 0
 fi
 
-notify "Creating the macOS VM" "The macOS step is done: finishing the VM in a terminal (10-40 minutes)."
-if command -v omarchy-launch-floating-terminal-with-presentation >/dev/null; then
-  omarchy-launch-floating-terminal-with-presentation "omarchy-macos-vm create"
-else
-  setsid -f uwsm-app -- xdg-terminal-exec -e bash -c "omarchy-macos-vm create; read -rp 'Press Enter to close'"
+if systemctl --user is-active --quiet "$unit.service"; then
+  exit 0
 fi
+notify "Creating the macOS VM" "The restored VM is on VMXFER: finishing it in the background (10-40 minutes)."
+systemctl --user reset-failed "$unit.service" 2>/dev/null || true
+systemd-run --user --unit="$unit" --collect --quiet --description="Omarchy: create the macOS VM" \
+  "$(command -v omarchy-macos-vm)" create --auto

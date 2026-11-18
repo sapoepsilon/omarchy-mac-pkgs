@@ -5,7 +5,7 @@
 
 pkgname=omarchy-macos-vm
 pkgver=0.1.0
-pkgrel=3
+pkgrel=4
 pkgdesc="Omarchy Mac: install the macOS VM stack (omvm) when the installer asked for it"
 arch=('any')
 url="https://github.com/sapoepsilon/omarchy-mac-pkgs/tree/macos-vm/omarchy-macos-vm"

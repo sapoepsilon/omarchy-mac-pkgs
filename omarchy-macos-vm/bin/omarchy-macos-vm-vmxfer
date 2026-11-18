@@ -1,11 +1,16 @@
 #!/bin/bash
 
 # omarchy-macos-vm-vmxfer.service: at boot (and when omarchy-macos-vm install
-# asks), look on the VMXFER partition for what the one-time macOS step leaves
-# there (vmxfer.sha256 and the restore bundle) and keep
-# /var/lib/omarchy/macos-vm/vmxfer-ready in step with it. Read-only: the
-# partition is mounted ro on a private directory and unmounted again; nothing
-# is verified or copied here (omvm ingest does that, as the user).
+# asks), look on the VMXFER partition for the restored VM the macOS side left
+# there (vmxfer.sha256 and the restore bundle: the developer installer's
+# "Set up a macOS VM" step, or omvm's run-on-macos.sh) and keep
+# /var/lib/omarchy/macos-vm/vmxfer-ready in step with it.
+#
+# When the VM is there, VMXFER stays mounted read-only at
+# /run/omarchy-macos-vm/vmxfer (the stamp's mount=), so the user's
+# `omvm ingest` at login needs no sudo password, and the side kernel is armed
+# to boot once by itself (omarchy-macos-vm-oneshot-boot arm). Nothing is
+# verified or copied here (omvm ingest does that, as the user).
 
 set -uo pipefail
 
@@ -13,6 +18,7 @@ root=${OMARCHY_MACOS_VM_ROOT:-}
 state_dir=$root/var/lib/omarchy/macos-vm
 stamp=$state_dir/vmxfer-ready
 mnt=${OMARCHY_MACOS_VM_VMXFER_MNT:-/run/omarchy-macos-vm/vmxfer}
+oneshot=${OMARCHY_MACOS_VM_ONESHOT:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-oneshot-boot}
 
 say() { printf 'omarchy-macos-vm-vmxfer: %s\n' "$*"; }
 
@@ -29,7 +35,8 @@ if [[ -n ${OMARCHY_MACOS_VM_VMXFER_DIR:-} ]]; then
 else
   dir=$(findmnt -rno TARGET "$device" | head -1)
   if [[ -z $dir ]]; then
-    mkdir -p "$mnt" && mount -t exfat -o ro,nosuid,nodev,noexec "$device" "$mnt" || {
+    # Read-only; files readable by every user (omvm ingest runs as the owner).
+    mkdir -p "$mnt" && mount -t exfat -o ro,nosuid,nodev,noexec,fmask=0133,dmask=0022 "$device" "$mnt" || {
       say "cannot mount $device read-only"
       exit 0
     }
@@ -40,12 +47,16 @@ fi
 
 if [[ -f $dir/vmxfer.sha256 ]] && compgen -G "$dir/*-restore.tar.gz" >/dev/null; then
   mkdir -p "$state_dir" &&
-    printf 'device=%s\nfound=%s\n' "$device" "$(date -u +%FT%TZ)" >"$stamp.new" && mv -f "$stamp.new" "$stamp"
-  say "the macOS step's VM is on $device: omarchy-macos-vm create finishes it"
-else
-  rm -f "$stamp"
-  say "$device has no restored VM yet"
+    printf 'device=%s\nmount=%s\nfound=%s\n' "$device" "$dir" "$(date -u +%FT%TZ)" >"$stamp.new" &&
+    mv -f "$stamp.new" "$stamp"
+  say "the restored macOS VM is on $device ($dir): it is finished at the next login"
+  if [[ -x $oneshot ]]; then
+    "$oneshot" arm || say "could not arm the side kernel's one-time boot"
+  fi
+  exit 0
 fi
 
+rm -f "$stamp"
+say "$device has no restored VM yet"
 ((mounted_here)) && umount "$mnt"
 exit 0

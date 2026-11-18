@@ -30,7 +30,10 @@ case $1 in
       for f in "${@:4}"; do b=${f##*/}; echo "${b%-*-*-*}" >>"$TEST_INSTALLED"; done ;;
   -S) [[ -z ${TEST_PACMAN_FAIL:-} ]] || exit 1 ;;
 esac'
-stub systemctl 'echo "systemctl $*" >>"$TEST_CALLS"'
+stub systemctl 'echo "systemctl $*" >>"$TEST_CALLS"; [[ $* != *is-active* || -n ${TEST_ACTIVE:-} ]]'
+stub systemd-run 'echo "systemd-run $*" >>"$TEST_CALLS"'
+# No VMXFER unless a test says so: the host running the tests may have one.
+stub lsblk 'exit 0'
 stub systemd-tmpfiles 'echo "systemd-tmpfiles $*" >>"$TEST_CALLS"'
 stub systemd-sysusers 'echo "systemd-sysusers $*" >>"$TEST_CALLS"'
 stub omvm 'echo "omvm $* home=${HOME:-}" >>"$TEST_CALLS"; echo "The one-time macOS step"'
@@ -86,6 +89,7 @@ grep -q '^omvm macos-step' "$calls" || fail "the macOS step is staged"
 grep -q '^package=omvm' "$root/var/lib/omarchy/macos-vm/done" || fail "the done stamp names the packages" "$(cat "$root/var/lib/omarchy/macos-vm/done")"
 grep -q 'systemctl disable omarchy-macos-vm-setup.service' "$calls" || fail "the service disables itself"
 grep -q 'BOOT_ORDER\|kernel default' "$calls" && fail "the default boot entry is never changed"
+grep -q '^systemctl start --no-block omarchy-macos-vm-vmxfer.service' "$calls" || fail "the setup looks on VMXFER right away" "$(cat "$calls")"
 pass "a marker installs the ESP packages, builds the side-kernel entry, checks the boot chain and stages the macOS step"
 
 : >"$calls"
@@ -118,6 +122,21 @@ grep -Fqx 'Include = /etc/pacman.d/omarchy-macos-vm.conf' "$root/etc/pacman.conf
 grep -q '^pacman -S --needed --noconfirm linux-aurora-vmapple qemu-vmapple' "$calls" || fail "packages come from the repository" "$(cat "$calls")"
 pass "a marker's https repo becomes the omarchy-macos-vm pacman repository"
 
+# The installer already put the restored VM on VMXFER: next steps are one restart.
+new_root installer-vm
+: >"$root/etc/omarchy/macos-vm.enabled"
+add_archives "$root/boot/efi/omarchy/macos-vm/repo"
+mkdir -p "$test_tmp/esp-xfer"
+: >"$test_tmp/esp-xfer/vmxfer.sha256"; : >"$test_tmp/esp-xfer/tahoe-26.4-25E246-restore.tar.gz"
+stub lsblk 'printf "/dev/nvme0n1p3 VMXFER\n"'
+OMARCHY_MACOS_VM_VMXFER_DIR=$test_tmp/esp-xfer run_setup
+stub lsblk 'exit 0'
+next=$root/var/lib/omarchy/macos-vm/next-steps.txt
+(( status == 0 )) && grep -q 'restored macOS VM is on VMXFER' "$next" && grep -q 'Restart once' "$next" &&
+  ! grep -q '^omvm macos-step' "$calls" && ! grep -qi xcode "$next" ||
+  fail "with the installer's VM on VMXFER the next steps are a login and one restart" "$(cat "$test_tmp/out" "$next")"
+pass "with the installer's VM on VMXFER there is no macOS step, only one restart"
+
 for unit in "$package"/files/usr/lib/systemd/system/*.service; do
   grep -Fq 'ConditionPathExists=/etc/omarchy/macos-vm.enabled' "$unit" || fail "$unit is gated on the marker"
   grep -Fxq 'Environment=HOME=/root' "$unit" || fail "$unit gives omvm a HOME"
@@ -142,9 +161,12 @@ vmxfer=$package/bin/omarchy-macos-vm-vmxfer
 xfer=$test_tmp/xfer
 mkdir -p "$xfer"
 stub findmnt 'exit 0'
+stub oneshot 'echo "oneshot $*" >>"$TEST_CALLS"'
 run_vmxfer() {
+  : >"$calls"
   set +e
   env OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_MACOS_VM_VMXFER_DIR="$xfer" PATH="$stub_bin:$PATH" \
+    OMARCHY_MACOS_VM_ONESHOT="$stub_bin/oneshot" TEST_CALLS="$calls" \
     bash "$vmxfer" >"$test_tmp/out" 2>&1
   status=$?
   set -e
@@ -152,10 +174,14 @@ run_vmxfer() {
 new_root vmxfer
 stub lsblk 'printf "/dev/nvme0n1p2 \n/dev/nvme0n1p3 VMXFER\n"'
 run_vmxfer
-(( status == 0 )) && [[ ! -e $root/var/lib/omarchy/macos-vm/vmxfer-ready ]] || fail "an empty VMXFER is not ready" "$(cat "$test_tmp/out")"
+(( status == 0 )) && [[ ! -e $root/var/lib/omarchy/macos-vm/vmxfer-ready ]] && ! grep -q oneshot "$calls" ||
+  fail "an empty VMXFER is not ready and arms nothing" "$(cat "$test_tmp/out")"
 : >"$xfer/vmxfer.sha256"; : >"$xfer/tahoe-26.4-25E246-restore.tar.gz"
 run_vmxfer
-grep -q '^device=/dev/nvme0n1p3' "$root/var/lib/omarchy/macos-vm/vmxfer-ready" || fail "the macOS step's output makes VMXFER ready" "$(cat "$test_tmp/out")"
+grep -q '^device=/dev/nvme0n1p3' "$root/var/lib/omarchy/macos-vm/vmxfer-ready" &&
+  grep -Fxq "mount=$xfer" "$root/var/lib/omarchy/macos-vm/vmxfer-ready" ||
+  fail "the macOS step's output makes VMXFER ready and names its mount" "$(cat "$test_tmp/out")"
+grep -Fxq 'oneshot arm' "$calls" || fail "a ready VMXFER arms the side kernel's one-time boot" "$(cat "$calls")"
 stub lsblk 'printf "/dev/nvme0n1p2 \n"'
 run_vmxfer
 (( status == 0 )) && [[ ! -e $root/var/lib/omarchy/macos-vm/vmxfer-ready ]] || fail "no VMXFER clears the stamp"
@@ -187,19 +213,26 @@ run_login
 (( status == 0 )) && ! grep -q '^\(notify\|terminal\)' "$calls" || fail "before the macOS step login does nothing" "$(cat "$calls")"
 touch "$lstate/vmxfer-ready"
 run_login
-grep -Fxq 'terminal omarchy-macos-vm create' "$calls" && grep -q '^notify Creating the macOS VM' "$calls" ||
-  fail "after the macOS step login opens a terminal running omarchy-macos-vm create" "$(cat "$calls")"
+grep -q "^systemd-run --user --unit=omarchy-macos-vm-creating .*$stub_bin/omarchy-macos-vm create --auto" "$calls" &&
+  grep -q '^notify Creating the macOS VM' "$calls" && ! grep -q '^terminal' "$calls" ||
+  fail "with the VM on VMXFER login runs omarchy-macos-vm create --auto in the background" "$(cat "$calls")"
+TEST_ACTIVE=1 run_login
+! grep -q '^systemd-run' "$calls" || fail "a create already running is not started twice" "$(cat "$calls")"
 mkdir -p "$limages/b-restore"; touch "$limages/b-restore/.ingested"
 run_login
-grep -q '^notify .*reboot to finish' "$calls" && ! grep -q '^terminal' "$calls" ||
+grep -q '^notify .*restart to finish Boot linux-aurora-vmapple from the Limine menu' "$calls" && ! grep -q '^systemd-run' "$calls" ||
   fail "imported on the stock kernel login only asks for the side kernel" "$(cat "$calls")"
+touch "$lstate/oneshot-armed"
+run_login
+grep -q '^notify .*restart to finish Restart once: Omarchy starts linux-aurora-vmapple by itself' "$calls" ||
+  fail "with the one-time boot armed login asks only for a restart" "$(cat "$calls")"
 touch "$kvm"
 run_login
-grep -Fxq 'terminal omarchy-macos-vm create' "$calls" || fail "on the side kernel login finishes the VM" "$(cat "$calls")"
+grep -q '^systemd-run .*create --auto' "$calls" || fail "on the side kernel login finishes the VM" "$(cat "$calls")"
 TEST_VM=1 run_login
-! grep -q '^terminal' "$calls" && [[ -s $user_home/.local/state/omarchy-macos-vm/vm-created ]] ||
+! grep -q '^systemd-run' "$calls" && [[ -s $user_home/.local/state/omarchy-macos-vm/vm-created ]] ||
   fail "once the VM exists login stops for good" "$(cat "$calls")"
 unit=$package/files/usr/lib/systemd/user/omarchy-macos-vm-create.service
 grep -Fq 'ConditionPathExists=!%h/.local/state/omarchy-macos-vm/vm-created' "$unit" && grep -Fxq 'WantedBy=graphical-session.target' "$unit" ||
   fail "the login unit runs at graphical login until the VM is created"
-pass "omarchy-macos-vm-login finishes the VM at the login after the macOS step, on the side kernel"
+pass "omarchy-macos-vm-login finishes the VM in the background at login, asking only for one restart"

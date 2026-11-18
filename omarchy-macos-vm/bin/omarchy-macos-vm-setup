@@ -145,15 +145,46 @@ host_setup() {
   systemd-tmpfiles --create omvm-udmabuf.conf 2>/dev/null || say "udmabuf limits apply after the next boot"
   systemctl --global enable omarchy-macos-vm-user.service omarchy-macos-vm-create.service ||
     fail "cannot enable omarchy-macos-vm-user.service for users"
-  systemctl enable omarchy-macos-vm-vmxfer.service >/dev/null 2>&1 || say "omarchy-macos-vm-vmxfer.service is enabled by its preset"
+  systemctl enable omarchy-macos-vm-vmxfer.service omarchy-macos-vm-oneshot-restore.service >/dev/null 2>&1 ||
+    say "omarchy-macos-vm-vmxfer.service is enabled by its preset"
 }
 
-# The macOS step needs the owner at the Mac; stage it and say what is next.
+# Whether VMXFER already holds the restored VM (the developer installer's
+# "Set up a macOS VM" step put it there before this first boot).
+vm_on_vmxfer() {
+  local device dir found=1 here=0
+  device=$(lsblk -rno PATH,LABEL 2>/dev/null | awk '$2=="VMXFER"{print $1; exit}')
+  [[ -n $device ]] || return 1
+  dir=${OMARCHY_MACOS_VM_VMXFER_DIR:-$(findmnt -rno TARGET "$device" | head -1)}
+  if [[ -z $dir ]]; then
+    dir=$(mktemp -d) || return 1
+    mount -t exfat -o ro "$device" "$dir" 2>/dev/null || { rmdir "$dir"; return 1; }
+    here=1
+  fi
+  [[ -f $dir/vmxfer.sha256 ]] && compgen -G "$dir/*-restore.tar.gz" >/dev/null && found=0
+  if ((here)); then umount "$dir" && rmdir "$dir"; fi
+  return $found
+}
+
+# What is next for the owner. With the VM already on VMXFER, only a restart;
+# otherwise the one-time macOS step, staged on the ESP.
 stage_macos_step() {
+  if vm_on_vmxfer; then
+    {
+      printf 'The restored macOS VM is on VMXFER (the installer made it before this first boot).\n\n'
+      printf '1. Log in: Omarchy imports it in the background (omvm ingest, 10-20 minutes).\n'
+      printf '2. Restart once: Omarchy starts %s by itself (omvm setup needs it).\n' "$side_kernel"
+      printf '3. Log in again: the VM is set up and defined (omvm setup, omvm virt; 10-30 minutes).\n\n'
+      printf 'Then open "macOS" from the launcher (Super + Space).\n'
+      printf 'Progress: journalctl --user -u omarchy-macos-vm-creating\n'
+    } >"$next_steps" || fail "cannot write $next_steps"
+    say "the restored VM is on VMXFER; next steps for the owner are in $next_steps"
+    return 0
+  fi
   omvm macos-step >"$next_steps" 2>&1 || fail "omvm macos-step failed: $(tail -n 1 "$next_steps")"
   {
     printf '\nBefore the macOS step, boot "%s" once from the Limine menu to try it;\n' "$side_kernel"
-    printf 'after it: omvm ingest && omvm setup --xcode (on %s), then omvm virt macos.\n' "$side_kernel"
+    printf 'after it, the VM is finished at the next logins (omvm ingest, setup, virt).\n'
   } >>"$next_steps"
   say "next steps for the owner are in $next_steps"
 }
@@ -176,6 +207,9 @@ main() {
   } >"$done_stamp.new" && mv -f "$done_stamp.new" "$done_stamp" || fail "cannot write $done_stamp"
   rm -f "$state_dir/last-error"
   systemctl disable omarchy-macos-vm-setup.service >/dev/null 2>&1 || true
+  # Look on VMXFER now, not at the next boot: it mounts it for ingest and arms
+  # the side kernel's one-time boot, so the first login can start the import.
+  systemctl start --no-block omarchy-macos-vm-vmxfer.service >/dev/null 2>&1 || true
   say "the macOS VM stack is installed; $side_kernel is in the boot menu, the stock kernel stays the default"
 }
 
