@@ -33,7 +33,7 @@ esac'
 stub systemctl 'echo "systemctl $*" >>"$TEST_CALLS"'
 stub systemd-tmpfiles 'echo "systemd-tmpfiles $*" >>"$TEST_CALLS"'
 stub systemd-sysusers 'echo "systemd-sysusers $*" >>"$TEST_CALLS"'
-stub omvm 'echo "omvm $*" >>"$TEST_CALLS"; echo "The one-time macOS step"'
+stub omvm 'echo "omvm $* home=${HOME:-}" >>"$TEST_CALLS"; echo "The one-time macOS step"'
 stub omarchy-mac-limine-active 'exit 0'
 stub omarchy-mac-boot-update 'echo "boot-update" >>"$TEST_CALLS"; printf "/+Omarchy\n  //linux-aurora\n  //linux-aurora-vmapple\n" >"$OMARCHY_ESP/limine.conf"; mkdir -p "$OMARCHY_ESP/EFI/Linux"; echo uki >"$OMARCHY_ESP/EFI/Linux/omarchy_linux-aurora-vmapple.efi"'
 stub omarchy-apple-silicon-boot-check 'echo "boot-check $* pending=$OMARCHY_BOOT_CHECK_ALLOW_PENDING_REBOOT" >>"$TEST_CALLS"; [[ -z ${TEST_BOOT_CHECK_FAIL:-} ]]'
@@ -54,7 +54,7 @@ add_archives() {
 }
 run_setup() {
   set +e
-  env OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_ESP="$root/boot/efi" OMARCHY_MACOS_VM_SKIP_HW=1 \
+  env -u HOME OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_ESP="$root/boot/efi" OMARCHY_MACOS_VM_SKIP_HW=1 \
     TEST_CALLS="$calls" TEST_INSTALLED="$test_tmp/installed" PATH="$stub_bin:$PATH" \
     bash "$setup" >"$test_tmp/out" 2>&1
   status=$?
@@ -74,6 +74,10 @@ run_setup
 (( status == 0 )) || fail "a marker with packages on the ESP succeeds" "$(cat "$test_tmp/out")"
 grep -q '^pacman -U --needed --noconfirm .*linux-aurora-vmapple-1.0-1-aarch64.pkg.tar.zst' "$calls" || fail "the ESP packages are installed" "$(cat "$calls")"
 ! grep -q 'headers' "$calls" || fail "a headers archive is not taken for the kernel" "$(cat "$calls")"
+sync_line=$(grep -n '^pacman -Sy' "$calls" | cut -d: -f1 | head -1)
+install_line=$(grep -n '^pacman -U' "$calls" | cut -d: -f1 | head -1)
+[[ -n $sync_line ]] && (( sync_line < install_line )) || fail "the sync databases are refreshed before pacman -U" "$(cat "$calls")"
+grep -q '^omvm macos-step home=/' "$calls" || fail "omvm runs with HOME set" "$(cat "$calls")"
 grep -Fxq boot-update "$calls" || fail "a missing side-kernel entry is built"
 grep -q '^boot-check --boot-chain pending=1' "$calls" || fail "the boot chain is checked"
 grep -q 'systemctl --global enable omarchy-macos-vm-user.service' "$calls" || fail "the user step is enabled"
@@ -116,6 +120,7 @@ pass "a marker's https repo becomes the omarchy-macos-vm pacman repository"
 
 for unit in "$package"/files/usr/lib/systemd/system/*.service; do
   grep -Fq 'ConditionPathExists=/etc/omarchy/macos-vm.enabled' "$unit" || fail "$unit is gated on the marker"
+  grep -Fxq 'Environment=HOME=/root' "$unit" || fail "$unit gives omvm a HOME"
 done
 pass "the system unit is gated on /etc/omarchy/macos-vm.enabled"
 

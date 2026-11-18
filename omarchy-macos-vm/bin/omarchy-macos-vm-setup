@@ -15,6 +15,8 @@
 
 set -uo pipefail
 
+# omvm runs under set -u and reads $HOME; a system unit has none.
+export HOME=${HOME:-/root}
 root=${OMARCHY_MACOS_VM_ROOT:-}
 marker=$root/etc/omarchy/macos-vm.enabled
 state_dir=$root/var/lib/omarchy/macos-vm
@@ -101,6 +103,8 @@ install_stack() {
   done
   wait_for_pacman
   if (( ${#archives[@]} )); then
+    # The archives' dependencies come from the sync repos; an image's databases are stale.
+    pacman -Sy --noconfirm || say "could not refresh the package databases; trying with the old ones"
     say "installing ${archives[*]##*/}"
     pacman -U --needed --noconfirm "${archives[@]}" || fail "pacman -U failed"
   else
