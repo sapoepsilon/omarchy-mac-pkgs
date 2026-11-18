@@ -8,4 +8,5 @@ for file in bin/*; do install -Dm755 "$file" "$destination/usr/lib/omarchy-macos
 while IFS= read -r -d '' file; do
   install -Dm644 "$file" "$destination/${file#files/}"
 done < <(find files -type f -print0)
+install -Dm755 cli/omarchy-macos-vm "$destination/usr/bin/omarchy-macos-vm"
 install -Dm644 LICENSE "$destination/usr/share/licenses/omarchy-macos-vm/LICENSE"

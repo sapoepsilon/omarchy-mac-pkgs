@@ -1,0 +1,687 @@
+#!/bin/bash
+
+# omarchy:summary=Install, launch, stop, inspect, or remove the macOS VM (Apple Silicon M1/M2)
+# omarchy:args=<install|remove|launch|stop|status|create> [options]
+
+# Shipped by the omarchy-macos-vm package (omarchy-mac-pkgs macos-vm) as
+# /usr/bin/omarchy-macos-vm, so images built on stock Omarchy have it; the copy
+# in omarchy-mac's macos-vm branch is where it started.
+#
+# The counterpart of omarchy-windows-vm for Apple Silicon. The macOS VM stack is
+# omvm (github.com/sapoepsilon/omvm): a side kernel with KVM for macOS guests,
+# the vmapple QEMU, a patched Honeykrisp and the omvm tool, from
+# omarchy-mac-pkgs's omarchy-macos-vm. The guest itself needs one boot into
+# macOS (the developer installer's "Set up a macOS VM" tick does it before the
+# first boot; otherwise omvm's run-on-macos.sh, the one-time macOS step):
+# Apple's Virtualization framework restores it onto the VMXFER partition.
+# Everything after that is automated: create (ingest -> setup -> virt) runs
+# from install when the restored VM is already on VMXFER, and otherwise at
+# each Omarchy login until it exists (omarchy-macos-vm-create.service, in the
+# omarchy-macos-vm package, runs `create --auto` in the background). setup
+# needs the side kernel; omarchy-macos-vm-vmxfer.service arranges for it to
+# boot once by itself, so all that is left to the owner is one restart.
+
+set -uo pipefail
+
+marker=${OMARCHY_MACOS_VM_MARKER:-/etc/omarchy/macos-vm.enabled}
+state_dir=${OMARCHY_MACOS_VM_STATE:-/var/lib/omarchy/macos-vm}
+user_state=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-macos-vm
+config_file=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/macos-vm.conf
+omvm_cfg=${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env
+omvm_data=${OMVM_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/omvm}
+omvm_images=${OMVM_IMAGES:-$omvm_data/images}
+stack=(omvm qemu-vmapple mesa-honeykrisp-vmapple linux-aurora-vmapple)
+side_kernel=linux-aurora-vmapple
+desktop_file=$HOME/.local/share/applications/macos-vm.desktop
+vm_name=${OMVM_VM:-macos}
+# The side kernel exposes this KVM parameter; omvm setup needs it booted.
+side_kernel_param=${OMARCHY_MACOS_VM_KVM_PARAM:-/sys/module/kvm/parameters/emulate_nisv_ldst}
+# The macOS restore makes a fixed 160 GB guest disk (sparse). The images, the
+# Xcode disk image and the setup layers need about this much free space.
+REQUIRED_SPACE_GB=${OMARCHY_MACOS_VM_REQUIRED_GB:-80}
+VIRSH=(virsh -q -c qemu:///session)
+
+show_usage() {
+  cat <<'USAGE'
+Usage: omarchy-macos-vm [command] [options]
+
+Commands:
+  install              Install the macOS VM stack and configure the VM
+  remove [--purge]     Remove the macOS VM and the stack (--purge also deletes guest images)
+  launch [options]     Start macOS VM (if needed) and open its window
+                       Options:
+                         --keep-alive, -k   Keep VM running after its window closes
+  stop                 Stop the running macOS VM
+  status               Show current VM status
+  create [--auto]      Finish the VM after the macOS step (ingest, setup, virt);
+                       --auto picks the account, RAM and cores without asking
+  help                 Show this help message
+
+Examples:
+  omarchy-macos-vm install           # Set up macOS VM for first time
+  omarchy-macos-vm launch            # Open the VM (auto-stop on exit)
+  omarchy-macos-vm launch -k         # Open the VM (keep running)
+  omarchy-macos-vm stop              # Shut down the VM
+USAGE
+}
+
+# --- helpers -----------------------------------------------------------------
+
+# M1 and M2 only: later Macs lock the PAuth registers a macOS guest needs.
+supported_mac() {
+  if command -v omarchy-hw-apple >/dev/null; then omarchy-hw-apple || return 1; fi
+  grep -Eaq 'apple,(t8103|t6000|t6001|t6002|t8112|t6020|t6021|t6022)' "${OMARCHY_APPLE_COMPATIBLE:-/proc/device-tree/compatible}"
+}
+
+# At login the notification daemon (Omarchy's shell) can start after us: wait
+# for it up to OMARCHY_MACOS_VM_NOTIFY_WAIT seconds, then fall back to
+# notify-send (which drops --exec) and the journal.
+notify_daemon_up() { busctl --user status org.freedesktop.Notifications >/dev/null 2>&1; }
+notify() {
+  local i wait=${OMARCHY_MACOS_VM_NOTIFY_WAIT:-90}
+  for ((i = 0; i < wait; i += 2)); do notify_daemon_up && break; sleep 2; done
+  omarchy-notification-send "$@" 2>/dev/null && return 0
+  local args=() a
+  for a in "$@"; do [[ $a == --exec ]] && break; args+=("$a"); done
+  notify-send "${args[@]}" 2>/dev/null || true
+  echo "notification: ${args[*]}" >&2
+}
+
+valid_ram() { [[ $1 =~ ^[0-9]{1,3}G$ ]] && ((10#${1%G} >= 4)); }
+valid_cores() { [[ $1 =~ ^[0-9]{1,2}$ ]] && ((10#$1 >= 1)); }
+valid_account() { [[ $1 =~ ^[a-z_][a-z0-9_-]{0,30}$ ]]; }
+valid_password() { [[ $1 =~ ^[[:print:]]{1,64}$ ]]; }
+
+# KEY [DEFAULT]: a setting from the macOS VM config (RAM_GIB, CPUS).
+setting() {
+  local value
+  value=$(sed -n "s/^$1=//p" "$config_file" 2>/dev/null | tail -1)
+  printf '%s\n' "${value:-${2:-}}"
+}
+
+save_settings() {
+  mkdir -p "${config_file%/*}" &&
+    printf '# omarchy-macos-vm install: what omvm virt %s is defined with\nRAM_GIB=%s\nCPUS=%s\n' \
+      "$vm_name" "$1" "$2" >"$config_file"
+}
+
+# omvm reads OMVM_GUEST_USER from its gui.env; set it, keeping every other line.
+save_guest_user() {
+  local tmp
+  mkdir -p "${omvm_cfg%/*}" && touch "$omvm_cfg" || return 1
+  tmp=$(mktemp "$omvm_cfg.XXXXXX") || return 1
+  { grep -v '^OMVM_GUEST_USER=' "$omvm_cfg"; echo "OMVM_GUEST_USER=$1"; } >"$tmp" && mv "$tmp" "$omvm_cfg"
+}
+
+guest_user() { sed -n 's/^OMVM_GUEST_USER=//p' "$omvm_cfg" 2>/dev/null | tail -1; }
+
+# omvm setup creates the guest account (image -v0) with the password in this
+# file, generating one when it is missing.
+account_created() { compgen -G "$omvm_images/*-v0" >/dev/null; }
+bundle_ingested() { compgen -G "$omvm_images/*-restore/.ingested" >/dev/null; }
+# The omarchy-macos-vm-vmxfer.service (root, at boot or on demand) looks on
+# VMXFER for the macOS step's output and leaves this stamp when it is there.
+vmxfer_ready() { [[ -e $state_dir/vmxfer-ready ]]; }
+on_side_kernel() { [[ -e $side_kernel_param ]]; }
+# omarchy-macos-vm-vmxfer.service keeps VMXFER mounted read-only here, so
+# omvm ingest needs no sudo password, and arms one boot of the side kernel.
+vmxfer_mount() { sed -n 's/^mount=//p' "$state_dir/vmxfer-ready" 2>/dev/null | tail -1; }
+oneshot_armed() { [[ -e $state_dir/oneshot-armed ]]; }
+
+# What to do on the stock kernel once the VM is imported.
+restart_step() {
+  if oneshot_armed; then
+    echo "Restart once: Omarchy starts $side_kernel by itself and finishes the VM at the next login."
+  else
+    echo "Boot $side_kernel from the Limine menu; the VM is finished at the next login."
+  fi
+}
+
+# The VM exists once omvm virt defined it in libvirt; omvm mode names its display.
+vm_exists() { command -v omvm >/dev/null && omvm mode "$vm_name" >/dev/null 2>&1; }
+vm_state() { "${VIRSH[@]}" domstate "$vm_name" 2>/dev/null | head -1; }
+
+available_storage_gb() {
+  local path=$omvm_data
+  while [[ ! -d $path ]]; do path=$(dirname -- "$path"); done
+  df -P -- "$path" | awk 'NR==2 {print int($4/1024/1024)}'
+}
+
+# The launcher entry, like windows-vm.desktop: "macOS" in Super + Space.
+write_desktop_entry() {
+  mkdir -p "${desktop_file%/*}"
+  cat >"$desktop_file" <<'EOF'
+[Desktop Entry]
+Name=macOS
+Comment=Start the macOS VM (omvm) and open its window
+Exec=uwsm app -- omarchy-macos-vm launch
+Icon=macos
+Terminal=false
+Type=Application
+Categories=System;Virtualization;
+Keywords=omvm;macOS;VM;
+EOF
+}
+
+# The window omvm show brings up: reims-vgpu's own window in local mode, a VNC
+# viewer in remote mode.
+vm_window() {
+  local class=vncviewer
+  [[ $(omvm mode "$vm_name" 2>/dev/null) == local ]] && class='^reims-vgpu$'
+  hyprctl clients -j 2>/dev/null | jq -r --arg re "$class" 'first(.[] | select(.class | test($re; "i")) | .address) // empty'
+}
+window_open() { hyprctl clients -j 2>/dev/null | jq -e --arg a "$1" 'any(.[]; .address == $a)' >/dev/null; }
+
+fullscreen_focused() {
+  hyprctl dispatch 'hl.dsp.window.fullscreen_state({ internal = 2, client = 2 })' >/dev/null 2>&1 ||
+    hyprctl dispatch fullscreenstate 2 2 >/dev/null 2>&1 || true
+}
+
+# The guest is up once omvm can log in over SSH (the account omvm setup made).
+wait_until_up() {
+  local i timeout=${OMARCHY_MACOS_VM_BOOT_TIMEOUT:-180}
+  for ((i = 0; i < timeout; i += 3)); do
+    timeout 8 omvm ssh "$vm_name" true </dev/null >/dev/null 2>&1 && return 0
+    [[ $(vm_state) == running ]] || return 1
+    sleep 3
+  done
+  return 1
+}
+
+# What is left before the VM exists, as one line for a notification.
+pending_step() {
+  if [[ ! -e $state_dir/done ]]; then
+    echo "Set up the stack first: Install > macOS in the Omarchy menu."
+  elif bundle_ingested || vmxfer_ready; then
+    if bundle_ingested && ! on_side_kernel; then
+      restart_step
+    else
+      echo "Finish it: omarchy-macos-vm create (ingest, setup, virt)."
+    fi
+  elif [[ -s $state_dir/next-steps.txt ]]; then
+    grep -E '^[0-9]+\.' "$state_dir/next-steps.txt" | tr -s ' '
+  else
+    echo "Do the one-time macOS step: omvm macos-step prints it."
+  fi
+}
+
+print_pending() {
+  if [[ -e $state_dir/done ]] && ! bundle_ingested && ! vmxfer_ready && [[ -s $state_dir/next-steps.txt ]]; then
+    cat "$state_dir/next-steps.txt"
+    echo
+    echo "After the macOS step, the rest (omvm ingest, setup, virt) runs at the next Omarchy login."
+  else
+    pending_step
+  fi
+}
+
+# --- commands ----------------------------------------------------------------
+
+install_stack() {
+  if [[ ! -e $marker ]]; then
+    sudo install -d -m 0755 "${marker%/*}" &&
+      printf '{"version":1,"requested_by":"menu"}\n' | sudo tee "$marker" >/dev/null || return 1
+  fi
+  if omarchy-pkg-missing omarchy-macos-vm; then
+    omarchy-pkg-add omarchy-macos-vm || {
+      echo "❌ omarchy-macos-vm is in no repository this Mac uses (see omarchy-mac-pkgs macos-vm BUILD.md)." >&2
+      return 1
+    }
+  fi
+  [[ -e $state_dir/done ]] && return 0
+  sudo systemctl enable omarchy-macos-vm-setup.service >/dev/null 2>&1 || true
+  echo "Installing the macOS VM stack (the log follows; this can take a few minutes)..."
+  sudo systemctl start omarchy-macos-vm-setup.service &
+  local starter=$!
+  journalctl -f -n 0 -o cat -u omarchy-macos-vm-setup.service &
+  local follower=$!
+  wait "$starter"
+  local status=$?
+  kill "$follower" 2>/dev/null
+  if ((status != 0)) || [[ ! -e $state_dir/done ]]; then
+    echo "❌ The setup did not finish: $(sudo cat "$state_dir/last-error" 2>/dev/null || echo 'see journalctl -u omarchy-macos-vm-setup')" >&2
+    return 1
+  fi
+  systemctl --user start omarchy-macos-vm-user.service 2>/dev/null || omvm prepare || true
+}
+
+install_macos() {
+  trap "echo ''; echo 'Installation cancelled by user'; exit 1" INT
+
+  supported_mac || {
+    echo "macOS VMs need an M1 or M2 Mac running Omarchy." >&2
+    exit 1
+  }
+  omarchy-pkg-add gum >/dev/null 2>&1 || command -v gum >/dev/null || exit 1
+
+  local total_ram total_ram_gb total_cores ram_options="" size selected_ram selected_cores
+  local default_ram default_cores account password password_display available
+  total_ram=$(free -h | awk 'NR==2 {print $2}')
+  total_ram_gb=$(awk 'NR==1 {printf "%d", $2/1024/1024}' /proc/meminfo)
+  total_cores=$(nproc)
+
+  echo ""
+  echo "System Resources Detected:"
+  echo "  Total RAM: $total_ram"
+  echo "  Total CPU Cores: $total_cores"
+  echo ""
+
+  for size in 4 8 16 32 64; do
+    ((size < total_ram_gb)) && ram_options="$ram_options ${size}G"
+  done
+  [[ -n $ram_options ]] || {
+    echo "❌ Not enough memory for a macOS VM (it needs 4G and some left for Omarchy)." >&2
+    exit 1
+  }
+  default_ram="$(setting RAM_GIB 16)G"
+  grep -qw -- "$default_ram" <<<"$ram_options" || default_ram=$(tr ' ' '\n' <<<"$ram_options" | tail -1)
+  selected_ram=$(tr ' ' '\n' <<<"${ram_options# }" | gum choose --selected="$default_ram" --header="How much RAM would you like to allocate to macOS VM?")
+  if [[ -z $selected_ram ]]; then
+    echo "Installation cancelled by user"
+    exit 1
+  fi
+
+  default_cores=$(setting CPUS 8)
+  ((default_cores > total_cores)) && default_cores=$total_cores
+  selected_cores=$(gum input --placeholder="Number of CPU cores (1-$total_cores)" --value="$default_cores" --header="How many CPU cores would you like to allocate to macOS VM?" --char-limit=2)
+  if [[ -z $selected_cores ]]; then
+    echo "Installation cancelled by user"
+    exit 1
+  fi
+  if ! valid_cores "$selected_cores" || ((selected_cores > total_cores)); then
+    echo "Invalid input. Using default: $default_cores cores"
+    selected_cores=$default_cores
+  fi
+
+  # The guest disk is the 160 GB (sparse) disk of the macOS restore; there is no
+  # size to choose, but the images need room on this disk.
+  if ! vm_exists; then
+    available=$(available_storage_gb) || available=0
+    if ((available < REQUIRED_SPACE_GB)); then
+      echo "❌ Insufficient disk space!"
+      echo "   Available: ${available}GB"
+      echo "   Required: ${REQUIRED_SPACE_GB}GB (the restored VM, Xcode and the setup layers)"
+      exit 1
+    fi
+  fi
+
+  if account_created; then
+    account=$(guest_user)
+    password_display="(set when the account was created)"
+  else
+    account=$(gum input --placeholder="macOS account name (Press enter to use default: $(guest_user || true))" --header="Enter the macOS account name:")
+    [[ -n $account ]] || account=$(guest_user)
+    [[ -n $account ]] || account=$(id -un)
+    if ! valid_account "$account"; then
+      echo "Invalid account name (lowercase letters, digits, - or _, up to 31 chars). Using default: $(id -un)"
+      account=$(id -un)
+    fi
+    password=$(gum input --placeholder="Password (Press enter to generate one)" --password --header="Enter the macOS password:")
+    if [[ -z $password ]]; then
+      password_display="(generated, in $omvm_data/guest-password)"
+    elif valid_password "$password"; then
+      password_display="(user-defined)"
+    else
+      echo "Invalid password (printable characters, up to 64). Generating one instead."
+      password=""
+      password_display="(generated, in $omvm_data/guest-password)"
+    fi
+  fi
+
+  gum style \
+    --border normal \
+    --padding "1 2" \
+    --margin "1" \
+    --align left \
+    --bold \
+    "macOS VM Configuration" \
+    "" \
+    "RAM:       $selected_ram" \
+    "CPU:       $selected_cores cores" \
+    "Disk:      160G (sparse, from the macOS restore)" \
+    "Account:   ${account:-(existing)}" \
+    "Password:  $password_display"
+
+  echo ""
+  if ! gum confirm "Proceed with this configuration?"; then
+    echo "Installation cancelled by user"
+    exit 1
+  fi
+
+  save_settings "${selected_ram%G}" "$selected_cores" || {
+    echo "❌ Failed to write $config_file." >&2
+    exit 1
+  }
+  if ! account_created; then
+    save_guest_user "$account" || {
+      echo "❌ Failed to write $omvm_cfg." >&2
+      exit 1
+    }
+    if [[ -n ${password:-} ]]; then
+      mkdir -p "$omvm_data" && (umask 077 && printf '%s\n' "$password" >"$omvm_data/guest-password") || {
+        echo "❌ Failed to store the macOS password." >&2
+        exit 1
+      }
+    fi
+  fi
+
+  install_stack || exit 1
+  write_desktop_entry
+
+  if vm_exists; then
+    echo ""
+    echo "Applying the new settings to the existing macOS VM..."
+    CPUS=$selected_cores RAM_GIB=${selected_ram%G} omvm virt "$vm_name" || exit 1
+    echo ""
+    echo "The new RAM and CPU settings apply from the VM's next start."
+    echo "Launch 'macOS' via Super + Space"
+    return 0
+  fi
+
+  # Look on VMXFER for the macOS step's output now rather than at the next boot.
+  sudo systemctl start omarchy-macos-vm-vmxfer.service 2>/dev/null || true
+  if bundle_ingested || vmxfer_ready; then
+    echo ""
+    echo "The restored macOS VM is on VMXFER: creating it now."
+    create_macos
+    return
+  fi
+
+  echo ""
+  print_pending
+  notify -u critical -t 0 "macOS VM: one step in macOS" "$(pending_step)" \
+    --exec "omarchy-launch-floating-terminal-with-presentation 'cat $state_dir/next-steps.txt'"
+  echo ""
+  echo "Once finished, launch 'macOS' via Super + Space"
+}
+
+# --auto, at login with nobody at a terminal: the guest account is this
+# user's name and the VM gets half the RAM (4-16G) and all but two cores (2-8),
+# unless omarchy-macos-vm install already chose them.
+auto_defaults() {
+  if [[ -z $(guest_user) ]] && valid_account "$(id -un)"; then
+    save_guest_user "$(id -un)" || return 1
+  fi
+  [[ -s $config_file ]] && return 0
+  local ram cpus
+  ram=$(awk 'NR==1 {printf "%d", $2/1024/1024/2}' "${OMARCHY_MACOS_VM_MEMINFO:-/proc/meminfo}")
+  ((ram > 16)) && ram=16
+  ((ram < 4)) && ram=4
+  cpus=$(($(nproc) - 2))
+  ((cpus > 8)) && cpus=8
+  ((cpus < 2)) && cpus=2
+  save_settings "$ram" "$cpus"
+}
+
+# ingest -> setup [--xcode] -> virt, each step skipped once done. Runs from
+# install, from each login until the VM exists (--auto), or by hand.
+create_macos() {
+  local auto=0
+  [[ ${1:-} == --auto ]] && auto=1
+  if vm_exists; then
+    echo "The macOS VM $vm_name already exists. Launch 'macOS' via Super + Space"
+    return 0
+  fi
+  [[ -e $state_dir/done ]] || {
+    echo "The macOS VM stack is not installed. To set up: omarchy-macos-vm install" >&2
+    return 1
+  }
+  if ! bundle_ingested && ! vmxfer_ready; then
+    print_pending >&2
+    return 1
+  fi
+  mkdir -p "$user_state"
+  if ((auto)); then
+    auto_defaults || {
+      echo "❌ Failed to save the macOS VM settings." >&2
+      return 1
+    }
+  fi
+
+  if ! bundle_ingested; then
+    local available mnt
+    available=$(available_storage_gb) || available=0
+    if ((available < REQUIRED_SPACE_GB)); then
+      echo "❌ ${available}GB free; the macOS VM needs ${REQUIRED_SPACE_GB}GB in Omarchy." >&2
+      notify -u critical "macOS VM: not enough space" "It needs ${REQUIRED_SPACE_GB} GB free in Omarchy; ${available} GB is free."
+      return 1
+    fi
+    mnt=$(vmxfer_mount)
+    [[ -n $mnt && -d $mnt ]] && export MNT=$mnt
+    notify "Creating the macOS VM" "Importing the VM restored in macOS (omvm ingest)"
+    echo "Importing the VM restored in macOS (omvm ingest; this can take 10-20 minutes)..."
+    omvm ingest || {
+      echo "❌ omvm ingest failed." >&2
+      notify -u critical "macOS VM" "omvm ingest failed; run omarchy-macos-vm create to retry"
+      return 1
+    }
+  fi
+  if ! on_side_kernel; then
+    echo ""
+    echo "The rest needs the macOS VM kernel ($side_kernel)."
+    restart_step
+    notify -u critical -t 0 "macOS VM: reboot to finish" "$(restart_step)"
+    return 2
+  fi
+
+  local xcode=()
+  [[ -f $omvm_images/Xcode.dmg ]] && xcode=(--xcode)
+  notify "Creating the macOS VM" "Setting up the guest (omvm setup${xcode:+ --xcode}); this takes 10-30 minutes"
+  echo "Setting up the guest (omvm setup ${xcode[*]})..."
+  if ! omvm setup "${xcode[@]}"; then
+    echo "❌ omvm setup failed." >&2
+    notify -u critical "macOS VM" "omvm setup failed; run omarchy-macos-vm create to retry"
+    return 1
+  fi
+
+  CPUS=$(setting CPUS 8) RAM_GIB=$(setting RAM_GIB 16) omvm virt "$vm_name" || {
+    echo "❌ omvm virt failed." >&2
+    notify -u critical "macOS VM" "omvm virt failed; run omarchy-macos-vm create to retry"
+    return 1
+  }
+  write_desktop_entry
+  date -u +%FT%TZ >"$user_state/vm-created"
+  echo ""
+  echo "macOS VM is ready! Launch 'macOS' via Super + Space"
+  notify "macOS VM is ready" "Opening it now; later, launch macOS via Super + Space"
+  # Unattended: open it the way the "macOS" launcher entry does, once.
+  if ((auto)) && [[ -z ${OMARCHY_MACOS_VM_NO_LAUNCH:-} ]]; then
+    systemd-run --user --unit=omarchy-macos-vm-launch --collect --quiet \
+      --description="Omarchy: open the macOS VM" omarchy-macos-vm launch ||
+      echo "Could not open the macOS VM; launch 'macOS' via Super + Space" >&2
+  fi
+}
+
+remove_macos() {
+  local purge=0
+  [[ ${1:-} == --purge ]] && purge=1
+  if ! gum confirm --default=false "Remove macOS VM and the macOS VM stack?"; then
+    echo "Removal cancelled by user"
+    exit 1
+  fi
+
+  echo "Removing macOS VM..."
+  if vm_exists; then
+    omvm virt rm --yes "$vm_name" || {
+      echo "❌ Could not remove the macOS VM from libvirt; nothing else was removed." >&2
+      exit 1
+    }
+  fi
+  if ((!purge)) && [[ -d $omvm_images ]] && compgen -G "$omvm_images/*" >/dev/null; then
+    gum confirm --default=false "Also delete the guest images in $omvm_images ($(du -sh "$omvm_images" 2>/dev/null | cut -f1))?" && purge=1
+  fi
+  if ((purge)); then
+    rm -rf "$omvm_images" "$omvm_data/guest-password"
+    echo "Guest images deleted."
+  elif [[ -d $omvm_images ]]; then
+    echo "Guest images kept in $omvm_images."
+  fi
+
+  local installed=() package
+  for package in "${stack[@]}"; do
+    omarchy-pkg-present "$package" && installed+=("$package")
+  done
+  if ((${#installed[@]})); then
+    omarchy-pkg-remove "${installed[@]}" || exit 1
+  fi
+  sudo rm -f "$marker" "$state_dir/done" "$state_dir/vmxfer-ready"
+  rm -f "$desktop_file" "$config_file"
+  rm -rf "$user_state"
+
+  echo ""
+  echo "macOS VM removal completed! linux-aurora boots as before."
+}
+
+launch_macos() {
+  local keep_alive=false window
+  if [[ ${1:-} == --keep-alive || ${1:-} == -k ]]; then
+    keep_alive=true
+  fi
+
+  if ! vm_exists; then
+    local steps open=()
+    steps=$(pending_step)
+    if [[ -e $state_dir/done ]] && { bundle_ingested || vmxfer_ready; } && on_side_kernel; then
+      open=(--exec "omarchy-launch-floating-terminal-with-presentation 'omarchy-macos-vm create'")
+    elif [[ -s $state_dir/next-steps.txt ]]; then
+      # The numbered steps fit a notification; a click shows the whole file.
+      open=(--exec "omarchy-launch-floating-terminal-with-presentation 'cat $state_dir/next-steps.txt'")
+    fi
+    printf 'The macOS VM %s does not exist yet.\n' "$vm_name" >&2
+    print_pending >&2
+    notify -u critical -t 0 "macOS VM not set up yet" "$steps" "${open[@]}"
+    exit 1
+  fi
+
+  echo "Starting macOS VM..."
+  if [[ $(vm_state) != running ]]; then
+    notify "macOS VM" "Starting macOS VM…"
+    if ! omvm start "$vm_name"; then
+      echo "❌ Failed to start macOS VM!"
+      echo "   Try checking: omarchy-macos-vm status"
+      notify -u critical "macOS VM" "Failed to start macOS VM"
+      exit 1
+    fi
+  fi
+  if ! wait_until_up; then
+    if [[ $(vm_state) != running ]]; then
+      echo "❌ The macOS VM stopped while booting."
+      notify -u critical "macOS VM" "The macOS VM stopped while booting; see omarchy-macos-vm status"
+      exit 1
+    fi
+    echo "macOS has not answered over SSH yet; opening its window anyway."
+  fi
+
+  if [[ $keep_alive == true ]]; then
+    lifecycle="VM will keep running after its window closes
+To stop: omarchy-macos-vm stop"
+  else
+    lifecycle="VM will auto-stop when its window closes"
+  fi
+  gum style \
+    --border normal \
+    --padding "1 2" \
+    --margin "1" \
+    --align center \
+    "Connecting to macOS VM" \
+    "" \
+    "$lifecycle" 2>/dev/null || printf 'Connecting to macOS VM\n%s\n' "$lifecycle"
+
+  if ! omvm show "$vm_name"; then
+    echo "❌ Could not open the macOS VM's window."
+    notify -u critical "macOS VM" "Could not open the macOS VM's window; see omarchy-macos-vm status"
+    exit 1
+  fi
+  fullscreen_focused
+
+  window=$(vm_window)
+  if [[ -z $window ]]; then
+    echo ""
+    echo "Could not find the macOS VM's window; it keeps running."
+    echo "To stop it: omarchy-macos-vm stop"
+    return 0
+  fi
+  while window_open "$window" && [[ $(vm_state) == running ]]; do
+    sleep "${OMARCHY_MACOS_VM_POLL:-2}"
+  done
+
+  if [[ $keep_alive == false ]]; then
+    echo ""
+    echo "Window closed. Stopping macOS VM..."
+    if omvm stop "$vm_name"; then
+      echo "macOS VM stopped."
+    else
+      echo "⚠️  Could not stop the macOS VM."
+      echo "   It may still be running. Stop it with: omarchy-macos-vm stop"
+    fi
+  else
+    echo ""
+    echo "Window closed. macOS VM is still running."
+    echo "To stop it: omarchy-macos-vm stop"
+  fi
+}
+
+stop_macos() {
+  if ! vm_exists; then
+    echo "macOS VM not configured."
+    exit 1
+  fi
+  echo "Stopping macOS VM..."
+  if omvm stop "$vm_name"; then
+    echo "macOS VM stopped."
+  else
+    echo "⚠️  Could not stop the macOS VM. It may still be running."
+    exit 1
+  fi
+}
+
+status_macos() {
+  if ! vm_exists; then
+    echo "macOS VM not configured."
+    if [[ -e $state_dir/done ]]; then
+      echo "Next: $(pending_step | head -1)"
+    else
+      echo "To set up: omarchy-macos-vm install"
+    fi
+    exit 1
+  fi
+
+  local state mode display
+  state=$(vm_state)
+  mode=$(omvm mode "$vm_name" 2>/dev/null)
+  [[ $mode == local ]] && display="a window on this screen (local)" || display="VNC + Sunshine (remote)"
+  if [[ $state == running ]]; then
+    gum style \
+      --border normal \
+      --padding "1 2" \
+      --margin "1" \
+      --align left \
+      "macOS VM Status: RUNNING" \
+      "" \
+      "Display:   $display" \
+      "SSH:       omvm ssh $vm_name" \
+      "Settings:  $(setting RAM_GIB 16)G RAM, $(setting CPUS 8) cores" \
+      "" \
+      "To connect: omarchy-macos-vm launch" \
+      "To stop:    omarchy-macos-vm stop"
+  else
+    echo "macOS VM is stopped (status: ${state:-unknown})"
+    echo "To start: omarchy-macos-vm launch"
+  fi
+}
+
+case "${1:-}" in
+install) install_macos ;;
+create) create_macos "${2:-}" ;;
+remove) remove_macos "${2:-}" ;;
+launch | start) launch_macos "${2:-}" ;;
+stop | down) stop_macos ;;
+status) status_macos ;;
+help | --help | -h | "") show_usage ;;
+*)
+  echo "Unknown command: $1" >&2
+  echo "" >&2
+  show_usage >&2
+  exit 1
+  ;;
+esac

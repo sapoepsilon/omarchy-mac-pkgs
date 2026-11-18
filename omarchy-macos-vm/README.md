@@ -32,6 +32,8 @@ Once the restored VM is on VMXFER the rest is automatic; the owner only restarts
 - `omarchy-macos-vm-oneshot-restore.service` (root, early on the next boot, whichever kernel started) puts `default_entry` back, so `linux-aurora` stays the default.
 - At each graphical login until the VM exists, `omarchy-macos-vm-create.service` (user) starts `omarchy-macos-vm create --auto` in the background (transient unit `omarchy-macos-vm-creating`): `omvm ingest`, then on `linux-aurora-vmapple` (which `omvm setup` needs) `omvm setup` and `omvm virt macos`, choosing the guest account (this user), RAM and cores unless `omarchy-macos-vm install` already did. On the stock kernel it stops after the import and a notification asks for the restart. The "macOS" launcher entry then opens the VM.
 
+The package also ships `/usr/bin/omarchy-macos-vm` (`install`, `create [--auto]`, `launch`, `stop`, `status`, `remove`; it started in omarchy-mac's `macos-vm` branch, which stock Omarchy images do not carry). `create --auto` opens the VM once it is defined (`omarchy-macos-vm launch` in the transient unit `omarchy-macos-vm-launch`). Notifications wait up to 90 s for the notification daemon, since the login step can start before Omarchy's shell; each one is also written to the journal.
+
 The stack setup itself never downloads Apple software and never creates a guest (that needs the macOS side). The default boot entry changes only for the one armed boot.
 
 ## Recipes

@@ -17,7 +17,17 @@ side_kernel_param=${OMARCHY_MACOS_VM_KVM_PARAM:-/sys/module/kvm/parameters/emula
 vm_name=${OMVM_VM:-macos}
 unit=omarchy-macos-vm-creating
 
-notify() { omarchy-notification-send "$@" 2>/dev/null || notify-send "$@" 2>/dev/null || true; }
+# The notification daemon (Omarchy's shell) can come up after this unit: wait
+# for it (OMARCHY_MACOS_VM_NOTIFY_WAIT seconds), and log what was sent.
+notify() {
+  local i wait=${OMARCHY_MACOS_VM_NOTIFY_WAIT:-90}
+  for ((i = 0; i < wait; i += 2)); do
+    busctl --user status org.freedesktop.Notifications >/dev/null 2>&1 && break
+    sleep 2
+  done
+  echo "notification: $*"
+  omarchy-notification-send "$@" 2>/dev/null || notify-send "$@" 2>/dev/null || true
+}
 
 if omvm mode "$vm_name" >/dev/null 2>&1; then
   mkdir -p "${created%/*}" && date -u +%FT%TZ >"$created"
