@@ -1,0 +1,17 @@
+# At boot, once the stack is installed and while no VM has been created yet:
+# whether the one-time macOS step left the restored VM on VMXFER
+# (/var/lib/omarchy/macos-vm/vmxfer-ready). omarchy-macos-vm install starts it too.
+[Unit]
+Description=Omarchy: look for the macOS step's VM on VMXFER
+ConditionPathExists=/etc/omarchy/macos-vm.enabled
+ConditionPathExists=/var/lib/omarchy/macos-vm/done
+After=local-fs.target
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+ExecStart=/usr/lib/omarchy-macos-vm/omarchy-macos-vm-vmxfer
+TimeoutStartSec=2min
+
+[Install]
+WantedBy=multi-user.target

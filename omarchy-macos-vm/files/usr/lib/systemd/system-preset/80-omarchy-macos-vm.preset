@@ -1,3 +1,4 @@
 # Enabled in every image that carries this package; it does nothing until
 # /etc/omarchy/macos-vm.enabled exists.
 enable omarchy-macos-vm-setup.service
+enable omarchy-macos-vm-vmxfer.service

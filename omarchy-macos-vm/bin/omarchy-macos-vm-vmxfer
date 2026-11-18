@@ -1,0 +1,51 @@
+#!/bin/bash
+
+# omarchy-macos-vm-vmxfer.service: at boot (and when omarchy-macos-vm install
+# asks), look on the VMXFER partition for what the one-time macOS step leaves
+# there (vmxfer.sha256 and the restore bundle) and keep
+# /var/lib/omarchy/macos-vm/vmxfer-ready in step with it. Read-only: the
+# partition is mounted ro on a private directory and unmounted again; nothing
+# is verified or copied here (omvm ingest does that, as the user).
+
+set -uo pipefail
+
+root=${OMARCHY_MACOS_VM_ROOT:-}
+state_dir=$root/var/lib/omarchy/macos-vm
+stamp=$state_dir/vmxfer-ready
+mnt=${OMARCHY_MACOS_VM_VMXFER_MNT:-/run/omarchy-macos-vm/vmxfer}
+
+say() { printf 'omarchy-macos-vm-vmxfer: %s\n' "$*"; }
+
+device=$(lsblk -rno PATH,LABEL | awk '$2=="VMXFER"{print $1; exit}')
+if [[ -z $device ]]; then
+  rm -f "$stamp"
+  say "no VMXFER partition"
+  exit 0
+fi
+
+mounted_here=0
+if [[ -n ${OMARCHY_MACOS_VM_VMXFER_DIR:-} ]]; then
+  dir=$OMARCHY_MACOS_VM_VMXFER_DIR
+else
+  dir=$(findmnt -rno TARGET "$device" | head -1)
+  if [[ -z $dir ]]; then
+    mkdir -p "$mnt" && mount -t exfat -o ro,nosuid,nodev,noexec "$device" "$mnt" || {
+      say "cannot mount $device read-only"
+      exit 0
+    }
+    dir=$mnt
+    mounted_here=1
+  fi
+fi
+
+if [[ -f $dir/vmxfer.sha256 ]] && compgen -G "$dir/*-restore.tar.gz" >/dev/null; then
+  mkdir -p "$state_dir" &&
+    printf 'device=%s\nfound=%s\n' "$device" "$(date -u +%FT%TZ)" >"$stamp.new" && mv -f "$stamp.new" "$stamp"
+  say "the macOS step's VM is on $device: omarchy-macos-vm create finishes it"
+else
+  rm -f "$stamp"
+  say "$device has no restored VM yet"
+fi
+
+((mounted_here)) && umount "$mnt"
+exit 0

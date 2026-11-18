@@ -26,7 +26,9 @@ Optional keys, for a marker written by hand or by an image builder: `repo` (a di
 
 Any failure is logged to the journal (`journalctl -u omarchy-macos-vm-setup`) and `/var/lib/omarchy/macos-vm/last-error`, leaves no done stamp, and the next boot retries. At each user's first login after that, `omarchy-macos-vm-user.service` adds the "macOS" launcher entry (`~/.local/share/applications/macos-vm.desktop`, running `omarchy-macos-vm launch`) and runs `omvm prepare` (SSH key, the pinned guest harness, `~/.config/omvm/gui.env`) and `omvm doctor`.
 
-It never downloads Apple software, never creates a guest (that needs the macOS step) and never changes the default boot entry.
+After the macOS step the rest is automatic. `omarchy-macos-vm-vmxfer.service` (root, every boot once the stack is installed, and on demand from `omarchy-macos-vm install`) mounts VMXFER read-only and writes `/var/lib/omarchy/macos-vm/vmxfer-ready` when the restored VM (`vmxfer.sha256` and the restore bundle) is on it. At each graphical login until the VM exists, `omarchy-macos-vm-create.service` (user) then opens a terminal running `omarchy-macos-vm create` (`omvm ingest`, `omvm setup [--xcode]`, `omvm virt macos` with the RAM and cores chosen at install); after the import on the stock kernel it only asks, in a notification, to boot `linux-aurora-vmapple`, which `omvm setup` needs.
+
+The stack setup itself never downloads Apple software, never creates a guest (that needs the macOS step) and never changes the default boot entry.
 
 ## Recipes
 

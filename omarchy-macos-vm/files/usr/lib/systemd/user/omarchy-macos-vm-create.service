@@ -1,0 +1,15 @@
+# At each graphical login until the macOS VM exists: after the one-time macOS
+# step, open a terminal that finishes the VM (omarchy-macos-vm create).
+[Unit]
+Description=Omarchy: finish the macOS VM after the macOS step
+ConditionPathExists=/var/lib/omarchy/macos-vm/done
+ConditionPathExists=!%h/.local/state/omarchy-macos-vm/vm-created
+After=graphical-session.target omarchy-macos-vm-user.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/omarchy-macos-vm/omarchy-macos-vm-login
+TimeoutStartSec=2min
+
+[Install]
+WantedBy=graphical-session.target

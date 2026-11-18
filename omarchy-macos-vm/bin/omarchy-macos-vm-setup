@@ -143,8 +143,9 @@ check_boot() {
 host_setup() {
   systemd-sysusers omvm.conf 2>/dev/null || say "the omvm group appears after the next boot"
   systemd-tmpfiles --create omvm-udmabuf.conf 2>/dev/null || say "udmabuf limits apply after the next boot"
-  systemctl --global enable omarchy-macos-vm-user.service ||
+  systemctl --global enable omarchy-macos-vm-user.service omarchy-macos-vm-create.service ||
     fail "cannot enable omarchy-macos-vm-user.service for users"
+  systemctl enable omarchy-macos-vm-vmxfer.service >/dev/null 2>&1 || say "omarchy-macos-vm-vmxfer.service is enabled by its preset"
 }
 
 # The macOS step needs the owner at the Mac; stage it and say what is next.

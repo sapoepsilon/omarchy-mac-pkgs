@@ -1,0 +1,49 @@
+#!/bin/bash
+
+# omarchy-macos-vm-create.service: at each graphical login until the macOS VM
+# exists. Once the one-time macOS step has left the restored VM on VMXFER (or
+# omvm ingest already imported it), open a terminal that runs
+# `omarchy-macos-vm create` (ingest, setup, virt: it may ask for the sudo
+# password to mount VMXFER and takes 10-40 minutes, so it runs where the owner
+# can see it). On the stock kernel, after the import, only a notification:
+# omvm setup needs linux-aurora-vmapple booted.
+
+set -uo pipefail
+
+state_dir=${OMARCHY_MACOS_VM_STATE:-/var/lib/omarchy/macos-vm}
+images=${OMVM_IMAGES:-${XDG_DATA_HOME:-$HOME/.local/share}/omvm/images}
+created=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-macos-vm/vm-created
+side_kernel_param=${OMARCHY_MACOS_VM_KVM_PARAM:-/sys/module/kvm/parameters/emulate_nisv_ldst}
+vm_name=${OMVM_VM:-macos}
+
+notify() { omarchy-notification-send "$@" 2>/dev/null || notify-send "$@" 2>/dev/null || true; }
+
+if omvm mode "$vm_name" >/dev/null 2>&1; then
+  mkdir -p "${created%/*}" && date -u +%FT%TZ >"$created"
+  exit 0
+fi
+
+ingested=0
+compgen -G "$images/*-restore/.ingested" >/dev/null && ingested=1
+if ((!ingested)) && [[ ! -e $state_dir/vmxfer-ready ]]; then
+  exit 0
+fi
+
+if ((ingested)) && [[ ! -e $side_kernel_param ]]; then
+  notify -u critical "macOS VM: reboot to finish" \
+    "Boot linux-aurora-vmapple from the Limine menu; the VM is finished at the next login."
+  exit 0
+fi
+
+if ! command -v omarchy-macos-vm >/dev/null; then
+  notify -u critical -t 0 "macOS VM: finish it" \
+    "In a terminal: omvm ingest && omvm setup --xcode && omvm virt $vm_name"
+  exit 0
+fi
+
+notify "Creating the macOS VM" "The macOS step is done: finishing the VM in a terminal (10-40 minutes)."
+if command -v omarchy-launch-floating-terminal-with-presentation >/dev/null; then
+  omarchy-launch-floating-terminal-with-presentation "omarchy-macos-vm create"
+else
+  setsid -f uwsm-app -- xdg-terminal-exec -e bash -c "omarchy-macos-vm create; read -rp 'Press Enter to close'"
+fi
