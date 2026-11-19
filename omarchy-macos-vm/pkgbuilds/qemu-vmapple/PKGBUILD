@@ -9,14 +9,14 @@
 
 pkgname=qemu-vmapple
 pkgver=10.1.50.r1b41f5f5
-pkgrel=1
+pkgrel=2
 pkgdesc="QEMU vmapple machine on KVM with the reims-vgpu GPU, for omvm's macOS guests"
 arch=('aarch64')
 url="https://github.com/sapoepsilon/omvm"
 license=('GPL-2.0-or-later' 'LGPL-3.0-or-later')
 depends=(glib2 pixman gtk3 vulkan-icd-loader libslirp dtc zlib libepoxy wayland libxkbcommon
          gnutls nettle libpipewire sdl3)
-makedepends=(git rustup ninja meson python python-distlib vulkan-headers clang lld pkgconf)
+makedepends=(git rustup ninja meson cmake python python-distlib vulkan-headers clang lld pkgconf)
 options=('!strip' '!lto')
 _qemu_commit=1b41f5f5db4d1067d023973b9bd74c7b341e0d28
 _reims_commit=1fe0acb68b287db36f1e6c7b9f45383940b8a76f
@@ -43,10 +43,14 @@ build() {
   # LSE atomics: reims-vgpu needs target-cpu=native on aarch64 Linux (docs/graphics.md).
   # makepkg.conf's RUSTFLAGS would override the target-specific variable, so extend it.
   (cd reims && RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=native" cargo xtask dist --out "$srcdir/reims-dist")
+  # Optional features meson would pick up from whatever the build host has
+  # installed (vte3, virglrenderer, libcacard, usbredir) are off: omvm uses none,
+  # and a binary linked to them does not start on a host without them.
   mkdir -p qemu/build
   cd qemu/build
   PKG_CONFIG_PATH="$srcdir/reims-dist/lib/pkgconfig" ../configure \
     --target-list=aarch64-softmmu --enable-kvm --enable-pvg --enable-gnutls --enable-vnc \
+    --disable-vte --disable-virglrenderer --disable-smartcard --disable-usb-redir \
     --disable-docs --disable-werror --extra-ldflags="-Wl,-rpath,$_prefix/lib"
   # No target: qemu-system-aarch64 alone skips pc-bios/keymaps, and QEMU then refuses to start.
   ninja
