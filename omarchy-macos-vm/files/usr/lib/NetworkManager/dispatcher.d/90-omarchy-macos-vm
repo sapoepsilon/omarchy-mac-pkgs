@@ -1,0 +1,12 @@
+#!/bin/bash
+# When this Mac comes online, start the macOS VM setup that is waiting for it
+# (omarchy-macos-vm-setup.service) instead of waiting out its restart delay.
+case "${2:-}" in
+up | connectivity-change) ;;
+*) exit 0 ;;
+esac
+[[ ${2:-} != connectivity-change || ${CONNECTIVITY_STATE:-} == FULL ]] || exit 0
+[[ -e /etc/omarchy/macos-vm.enabled && ! -e /var/lib/omarchy/macos-vm/done ]] || exit 0
+systemctl is-active --quiet omarchy-macos-vm-setup.service && exit 0
+systemctl start --no-block omarchy-macos-vm-setup.service >/dev/null 2>&1 || true
+exit 0

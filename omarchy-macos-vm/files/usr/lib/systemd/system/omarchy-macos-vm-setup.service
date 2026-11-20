@@ -1,18 +1,25 @@
 # Installs the macOS VM stack when the installer asked for it: install.conf's
-# macos_vm=1 becomes /etc/omarchy/macos-vm.enabled at first boot. Runs after
-# first boot, retries on every boot until it is done, then disables itself.
+# macos_vm=1 becomes /etc/omarchy/macos-vm.enabled at first boot. It waits for
+# internet, restarts after a transient failure (exit 75), then disables itself.
 [Unit]
 Description=Omarchy: install the macOS VM stack (omvm) requested at install
 ConditionPathExists=/etc/omarchy/macos-vm.enabled
 ConditionPathExists=!/var/lib/omarchy/macos-vm/done
 Wants=network-online.target
 After=network-online.target omarchy-mac-first-boot.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 Environment=HOME=/root
 Environment=PATH=/usr/share/omarchy/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 ExecStart=/usr/lib/omarchy-macos-vm/omarchy-macos-vm-setup
+# No internet, a mirror's 404 or a held pacman lock exit 75: try again, backing off.
+Restart=on-failure
+RestartPreventExitStatus=1
+RestartSec=30s
+RestartSteps=5
+RestartMaxDelaySec=10min
 TimeoutStartSec=1h
 StandardOutput=journal
 StandardError=journal

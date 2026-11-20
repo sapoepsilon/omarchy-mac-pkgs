@@ -1,0 +1,14 @@
+# During a session: when the system side finishes (the done stamp) or finds the
+# macOS step's VM on VMXFER (vmxfer-ready), run omarchy-macos-vm-create.service
+# now instead of at the next login.
+[Unit]
+Description=Omarchy: watch for the macOS VM to become ready to create
+ConditionPathExists=!%h/.local/state/omarchy-macos-vm/vm-created
+
+[Path]
+PathChanged=/var/lib/omarchy/macos-vm/done
+PathChanged=/var/lib/omarchy/macos-vm/vmxfer-ready
+Unit=omarchy-macos-vm-create.service
+
+[Install]
+WantedBy=graphical-session.target

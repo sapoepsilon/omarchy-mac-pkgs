@@ -19,6 +19,7 @@ state_dir=$root/var/lib/omarchy/macos-vm
 stamp=$state_dir/vmxfer-ready
 mnt=${OMARCHY_MACOS_VM_VMXFER_MNT:-/run/omarchy-macos-vm/vmxfer}
 oneshot=${OMARCHY_MACOS_VM_ONESHOT:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-oneshot-boot}
+users_helper=${OMARCHY_MACOS_VM_USERS:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-users}
 
 say() { printf 'omarchy-macos-vm-vmxfer: %s\n' "$*"; }
 
@@ -53,6 +54,8 @@ if [[ -f $dir/vmxfer.sha256 ]] && compgen -G "$dir/*-restore.tar.gz" >/dev/null;
   if [[ -x $oneshot ]]; then
     "$oneshot" arm || say "could not arm the side kernel's one-time boot"
   fi
+  # Whoever is logged in starts the import now (omarchy-macos-vm-create.service).
+  [[ -x $users_helper ]] && "$users_helper" kick
   exit 0
 fi
 

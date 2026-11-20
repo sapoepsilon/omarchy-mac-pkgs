@@ -6,7 +6,8 @@
 # entry, set up the host side omvm needs, and stage the one-time macOS step.
 # It never downloads Apple software, never changes the default boot entry, and
 # never touches the stock kernel. Idempotent: every step checks before it acts,
-# and a failure leaves the done stamp unwritten, so the next boot retries.
+# and a failure leaves the done stamp unwritten. Without internet it waits, then
+# exits 75 so the unit restarts (and NetworkManager starts it when a link comes up).
 #
 # The marker is JSON, {"version":1,"requested_by":"installer"}, written by
 # omarchy-mac-first-boot from install.conf's macos_vm=1. Optional keys:
@@ -26,12 +27,67 @@ esp=${OMARCHY_ESP:-/boot/efi}
 packages=(linux-aurora-vmapple qemu-vmapple mesa-honeykrisp-vmapple omvm)
 optional_packages=(virt-manager)
 side_kernel=linux-aurora-vmapple
+users_helper=${OMARCHY_MACOS_VM_USERS:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-users}
+# How long one run waits for internet before it exits 75 and the unit restarts.
+network_wait=${OMARCHY_MACOS_VM_NETWORK_WAIT:-900}
 
 say() { printf 'omarchy-macos-vm-setup: %s\n' "$*"; }
+# fail MESSAGE [STATUS]: 75 is "try again" (the unit restarts); 1 needs the owner.
 fail() {
-  say "$*" >&2
-  mkdir -p "$state_dir" && printf '%s\n' "$*" >"$state_dir/last-error"
-  exit 1
+  say "$1" >&2
+  mkdir -p "$state_dir" && printf '%s\n' "$1" >"$state_dir/last-error"
+  if [[ ${2:-1} == 75 ]]; then set_status retrying; else set_status failed; fi
+  exit "${2:-1}"
+}
+
+# What the setup is doing, for omarchy-macos-vm launch and status (world-readable).
+set_status() {
+  mkdir -p "$state_dir" && printf 'stage=%s\nupdated=%s\n' "$1" "$(date -u +%FT%TZ)" >"$state_dir/status"
+}
+
+users() { [[ -x $users_helper ]] && "$users_helper" "$@"; }
+
+# The hosts pacman downloads from: the first server of each repository, and the
+# marker's repository.
+package_hosts() {
+  local repo
+  {
+    for repo in $(pacman-conf --repo-list 2>/dev/null); do pacman-conf -r "$repo" Server 2>/dev/null | head -1; done
+    marker_value repo
+  } | sed -n 's|^https\{0,1\}://\([^/:]*\).*|\1|p' | sort -u
+}
+
+# Whether every package host resolves and answers HTTPS (any HTTP status will do).
+online() {
+  local host code
+  local -a hosts
+  mapfile -t hosts < <(package_hosts)
+  ((${#hosts[@]})) || hosts=(arm-mirror.omarchy.org)
+  for host in "${hosts[@]}"; do
+    getent ahosts "$host" >/dev/null 2>&1 || return 1
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$host/" 2>/dev/null)
+    [[ -n $code && $code != 000 ]] || return 1
+  done
+}
+
+# Wait for the package hosts with backoff, telling the logged-in users once.
+wait_for_network() {
+  local waited=0 delay=5 told=0
+  until online; do
+    if ((!told)); then
+      set_status waiting-for-internet
+      say "no internet yet; waiting up to ${network_wait}s for the package mirrors"
+      users notify -u critical "macOS VM: waiting for internet" \
+        "Connect to Wi-Fi: the macOS VM is set up as soon as this Mac is online."
+      told=1
+    fi
+    ((waited < network_wait)) || fail "no internet after ${network_wait}s; trying again in a few minutes" 75
+    sleep "$delay"
+    ((waited += delay))
+    ((delay < 60)) && ((delay *= 2))
+  done
+  ((told)) && say "online"
+  return 0
 }
 
 # A key of the marker's JSON, or nothing. A marker that is not JSON (an empty
@@ -48,7 +104,7 @@ print(value if isinstance(value, str) else "")' "$marker" "$1" 2>/dev/null || tr
 wait_for_pacman() {
   local tries=0
   while [[ -e $root/var/lib/pacman/db.lck ]]; do
-    (( tries++ < 120 )) || fail "pacman's lock /var/lib/pacman/db.lck stayed for 10 minutes"
+    (( tries++ < 120 )) || fail "pacman's lock /var/lib/pacman/db.lck stayed for 10 minutes" 75
     sleep 5
   done
 }
@@ -101,19 +157,21 @@ install_stack() {
     (( ${#archives[@]} == ${#packages[@]} )) && break
     archives=()
   done
+  wait_for_network
+  set_status installing
   wait_for_pacman
   if (( ${#archives[@]} )); then
     # The archives' dependencies come from the sync repos; an image's databases are stale.
     pacman -Sy --noconfirm || say "could not refresh the package databases; trying with the old ones"
     say "installing ${archives[*]##*/}"
-    pacman -U --needed --noconfirm "${archives[@]}" || fail "pacman -U failed"
+    pacman -U --needed --noconfirm "${archives[@]}" || fail "pacman -U failed" 75
   else
     if [[ $repo == https://* ]]; then
       add_repository "$repo"
-      pacman -Sy --noconfirm || fail "cannot refresh the package databases"
+      pacman -Sy --noconfirm || fail "cannot refresh the package databases" 75
     fi
     pacman -S --needed --noconfirm "${packages[@]}" ||
-      fail "the macOS VM packages are in no package directory and no repository (see BUILD.md)"
+      fail "the macOS VM packages are in no package directory and no repository (see BUILD.md)" 75
   fi
   pacman -S --needed --noconfirm "${optional_packages[@]}" ||
     say "could not install ${optional_packages[*]}; omvm works without it"
@@ -143,7 +201,7 @@ check_boot() {
 host_setup() {
   systemd-sysusers omvm.conf 2>/dev/null || say "the omvm group appears after the next boot"
   systemd-tmpfiles --create omvm-udmabuf.conf 2>/dev/null || say "udmabuf limits apply after the next boot"
-  systemctl --global enable omarchy-macos-vm-user.service omarchy-macos-vm-create.service ||
+  systemctl --global enable omarchy-macos-vm-user.service omarchy-macos-vm-create.service omarchy-macos-vm-create.path ||
     fail "cannot enable omarchy-macos-vm-user.service for users"
   systemctl enable omarchy-macos-vm-vmxfer.service omarchy-macos-vm-oneshot-restore.service >/dev/null 2>&1 ||
     say "omarchy-macos-vm-vmxfer.service is enabled by its preset"
@@ -176,7 +234,7 @@ stage_macos_step() {
       printf '2. Restart once: Omarchy starts %s by itself (omvm setup needs it).\n' "$side_kernel"
       printf '3. Log in again: the VM is set up and defined (omvm setup, omvm virt; 10-30 minutes).\n\n'
       printf 'Then open "macOS" from the launcher (Super + Space).\n'
-      printf 'Progress: journalctl --user -u omarchy-macos-vm-creating\n'
+      printf 'Progress: omarchy-macos-vm progress (opens by itself in a terminal)\n'
     } >"$next_steps" || fail "cannot write $next_steps"
     say "the restored VM is on VMXFER; next steps for the owner are in $next_steps"
     return 0
@@ -206,10 +264,13 @@ main() {
     pacman -Q "${packages[@]}" 2>/dev/null | sed 's/^/package=/'
   } >"$done_stamp.new" && mv -f "$done_stamp.new" "$done_stamp" || fail "cannot write $done_stamp"
   rm -f "$state_dir/last-error"
+  set_status done
   systemctl disable omarchy-macos-vm-setup.service >/dev/null 2>&1 || true
   # Look on VMXFER now, not at the next boot: it mounts it for ingest and arms
   # the side kernel's one-time boot, so the first login can start the import.
   systemctl start --no-block omarchy-macos-vm-vmxfer.service >/dev/null 2>&1 || true
+  # A user already logged in gets the per-user steps now, not at the next login.
+  users kick || true
   say "the macOS VM stack is installed; $side_kernel is in the boot menu, the stock kernel stays the default"
 }
 

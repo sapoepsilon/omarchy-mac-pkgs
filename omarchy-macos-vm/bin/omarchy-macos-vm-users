@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# For the system units, which run as root: reach the users logged in right now.
+#   notify ARGS...  send them a desktop notification (omarchy-notification-send ARGS)
+#   kick            start the per-user steps in their running sessions, so a user who
+#                   logged in before the stack was ready does not wait for the next login
+# Users with no running user manager are skipped; their login runs the steps.
+
+set -uo pipefail
+
+user_units=(omarchy-macos-vm-user.service omarchy-macos-vm-create.path omarchy-macos-vm-create.service)
+
+# The user names with a running user manager.
+session_users() {
+  local uid
+  loginctl list-users --no-legend 2>/dev/null | awk '$1 >= 1000 {print $1}' | while read -r uid; do
+    systemctl is-active --quiet "user@$uid.service" 2>/dev/null && id -nu "$uid" 2>/dev/null
+  done
+}
+
+notify_users() {
+  local user
+  for user in $(session_users); do
+    timeout 20 systemd-run --user -M "$user@" --quiet --collect \
+      bash -c 'omarchy-notification-send "$@" 2>/dev/null || notify-send "$@"' notify "$@" >/dev/null 2>&1 || true
+  done
+}
+
+kick_users() {
+  local user
+  for user in $(session_users); do
+    # The package can arrive after the login: the user manager must reread its units.
+    timeout 20 systemctl --user -M "$user@" daemon-reload >/dev/null 2>&1 || true
+    timeout 20 systemctl --user -M "$user@" start --no-block "${user_units[@]}" >/dev/null 2>&1 ||
+      echo "omarchy-macos-vm-users: could not start the macOS VM steps for $user" >&2
+  done
+}
+
+case "${1:-}" in
+notify) shift; notify_users "$@" ;;
+kick) kick_users ;;
+*)
+  echo "Usage: omarchy-macos-vm-users <notify ARGS...|kick>" >&2
+  exit 1
+  ;;
+esac

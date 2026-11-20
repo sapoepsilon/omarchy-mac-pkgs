@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # omarchy:summary=Install, launch, stop, inspect, or remove the macOS VM (Apple Silicon M1/M2)
-# omarchy:args=<install|remove|launch|stop|status|create> [options]
+# omarchy:args=<install|remove|launch|stop|status|create|progress> [options]
 
 # Shipped by the omarchy-macos-vm package (omarchy-mac-pkgs macos-vm) as
 # /usr/bin/omarchy-macos-vm, so images built on stock Omarchy have it; the copy
@@ -40,6 +40,11 @@ side_kernel_param=${OMARCHY_MACOS_VM_KVM_PARAM:-/sys/module/kvm/parameters/emula
 # Xcode disk image and the setup layers need about this much free space.
 REQUIRED_SPACE_GB=${OMARCHY_MACOS_VM_REQUIRED_GB:-80}
 VIRSH=(virsh -q -c qemu:///session)
+# What create is doing (stage, percent, detail) and its output, for the progress view.
+progress_file=$user_state/progress
+create_log=$user_state/create.log
+creating_unit=omarchy-macos-vm-creating
+progress_pid=${XDG_RUNTIME_DIR:-/tmp}/omarchy-macos-vm-progress.pid
 
 show_usage() {
   cat <<'USAGE'
@@ -55,6 +60,7 @@ Commands:
   status               Show current VM status
   create [--auto]      Finish the VM after the macOS step (ingest, setup, virt);
                        --auto picks the account, RAM and cores without asking
+  progress             Follow the setup (stage, percent, log) until it is done
   help                 Show this help message
 
 Examples:
@@ -128,6 +134,171 @@ on_side_kernel() { [[ -e $side_kernel_param ]]; }
 vmxfer_mount() { sed -n 's/^mount=//p' "$state_dir/vmxfer-ready" 2>/dev/null | tail -1; }
 oneshot_armed() { [[ -e $state_dir/oneshot-armed ]]; }
 
+# --- progress ----------------------------------------------------------------
+
+# STAGE PERCENT DETAIL: what create is doing now.
+set_progress() {
+  mkdir -p "$user_state" &&
+    printf 'stage=%s\npercent=%s\ndetail=%s\nupdated=%s\n' "$1" "$2" "$3" "$(date -u +%FT%TZ)" >"$progress_file.new" &&
+    mv -f "$progress_file.new" "$progress_file"
+}
+progress_value() { sed -n "s/^$1=//p" "$progress_file" 2>/dev/null | tail -1; }
+# The system setup's stage (omarchy-macos-vm-setup writes it): waiting-for-internet, installing, ...
+system_stage() { sed -n 's/^stage=//p' "$state_dir/status" 2>/dev/null | tail -1; }
+creating() { systemctl --user is-active --quiet "$creating_unit.service" 2>/dev/null; }
+
+stage_name() {
+  case $1 in
+  waiting-for-internet) echo "Waiting for internet" ;;
+  installing | retrying) echo "Installing the macOS VM stack" ;;
+  importing) echo "Importing" ;;
+  restart-needed) echo "Restart needed" ;;
+  setting-up) echo "Setting up" ;;
+  ready) echo "Ready" ;;
+  failed) echo "Failed" ;;
+  *) echo "$1" ;;
+  esac
+}
+
+# The setup still running, as "STAGE PERCENT" (percent may be empty); nothing when idle.
+in_progress() {
+  local stage
+  if [[ ! -e $state_dir/done ]]; then
+    stage=$(system_stage)
+    case $stage in
+    waiting-for-internet | installing | retrying) echo "$stage" ;;
+    esac
+    return 0
+  fi
+  creating || return 0
+  stage=$(progress_value stage)
+  echo "${stage:-importing} $(progress_value percent)"
+}
+
+# "Importing, 10%" for a notification.
+progress_summary() {
+  local stage percent
+  read -r stage percent <<<"$1"
+  printf '%s%s' "$(stage_name "$stage")" "${percent:+, $percent%}"
+}
+
+# Run COMMAND..., copying its output to the create log and moving the progress
+# on at the lines omvm prints at each step.
+tracked() {
+  local line
+  "$@" 2>&1 | while IFS= read -r line; do
+    printf '%s\n' "$line"
+    printf '%s\n' "$line" >>"$create_log"
+    case $line in
+    *"== verifying transfer checksums"*) set_progress importing 5 "Verifying the transfer" ;;
+    *"== unpacking bundle"*) set_progress importing 10 "Unpacking the VM (the longest part, 10-15 minutes)" ;;
+    *"== checking bundle manifest"*) set_progress importing 28 "Checking the VM" ;;
+    *"== re-sparsifying disk image"*) set_progress importing 30 "Compacting the disk image" ;;
+    *"== wrote "*) set_progress importing 34 "Imported" ;;
+    *"creating guest account"*) set_progress setting-up 45 "Creating the macOS account (about 3 minutes)" ;;
+    *"headless settings"*) set_progress setting-up 55 "Installing the Command Line Tools (about 5 minutes)" ;;
+    *"installing Xcode"*) set_progress setting-up 70 "Installing Xcode (about 15 minutes)" ;;
+    *"building the GPU-path QEMU"*) set_progress setting-up 90 "Building the display backend (once, about 15 minutes)" ;;
+    esac
+  done
+  return "${PIPESTATUS[0]}"
+}
+
+# Open the progress view in a floating terminal, unless one is open already.
+open_progress() {
+  local pid
+  pid=$(cat "$progress_pid" 2>/dev/null)
+  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null && return 0
+  [[ -n ${WAYLAND_DISPLAY:-} ]] || return 0
+  systemd-run --user --unit=omarchy-macos-vm-progress-view --collect --quiet \
+    omarchy-launch-floating-terminal-with-presentation "omarchy-macos-vm progress" >/dev/null 2>&1 || true
+}
+
+progress_bar() {
+  local percent=${1:-0} width=30 filled
+  [[ $percent =~ ^[0-9]{1,3}$ ]] && ((percent <= 100)) || percent=0
+  filled=$((percent * width / 100))
+  printf '[%s%s] %3s%%' "$(printf '%*s' "$filled" '' | tr ' ' '#')" "$(printf '%*s' $((width - filled)) '' | tr ' ' '.')" "$percent"
+}
+
+# The view: every stage with where it is, the current step and the last lines of output.
+show_progress() {
+  local stage percent detail mark name current_index=0 i
+  local -a stages=(importing restart-needed setting-up ready)
+  echo $$ >"$progress_pid" 2>/dev/null
+  trap 'rm -f "$progress_pid"' EXIT
+  while true; do
+    if [[ ! -e $state_dir/done ]]; then
+      stage=$(system_stage)
+      percent=0
+      case $stage in
+      waiting-for-internet) detail="Connect to Wi-Fi: the setup starts as soon as this Mac is online." ;;
+      failed) detail=$(cat "$state_dir/last-error" 2>/dev/null) ;;
+      *) stage=installing detail="Installing the macOS VM packages (a few minutes)" ;;
+      esac
+    else
+      stage=$(progress_value stage)
+      percent=$(progress_value percent)
+      detail=$(progress_value detail)
+      if vm_exists; then
+        stage=ready percent=100 detail="The macOS VM is ready"
+      elif [[ -z $stage ]] || { creating && [[ $stage == restart-needed || $stage == failed ]]; }; then
+        # A new run has started and not written its first step yet.
+        stage=importing percent=0 detail="Starting"
+      fi
+    fi
+    printf '\033[H\033[2J'
+    printf '\n  macOS VM setup\n\n'
+    current_index=-1
+    for i in "${!stages[@]}"; do [[ ${stages[i]} == "$stage" ]] && current_index=$i; done
+    if ((current_index < 0)) && [[ -n $stage ]]; then
+      printf '  > %s\n' "$(stage_name "${stage:-waiting}")"
+    fi
+    for i in "${!stages[@]}"; do
+      name=$(stage_name "${stages[i]}")
+      if ((current_index < 0 || i > current_index)); then
+        mark=" "
+      elif ((i < current_index)) || [[ ${stages[i]} == ready ]]; then
+        mark="x"
+      else
+        mark=">"
+      fi
+      printf '  [%s] %s\n' "$mark" "$name"
+    done
+    printf '\n  %s\n  %s\n' "$(progress_bar "${percent:-0}")" "${detail:-}"
+    if [[ $stage == importing && -d $omvm_images ]]; then
+      printf '  Imported so far: %s\n' "$(du -sh "$omvm_images" 2>/dev/null | cut -f1)"
+    fi
+    if [[ -s $create_log ]]; then
+      printf '\n  Last output:\n'
+      tail -n 6 "$create_log" | cut -c1-100 | sed 's/^/    /'
+    fi
+    case $stage in
+    ready)
+      printf '\n  macOS VM ready: open it from Super + Space (macOS).\n'
+      return 0
+      ;;
+    restart-needed)
+      printf '\n  Restart needed. %s\n' "$(restart_step)"
+      return 0
+      ;;
+    failed)
+      if [[ -e $state_dir/done ]]; then
+        printf '\n  The setup stopped. Retry: omarchy-macos-vm create\n'
+      else
+        printf '\n  The setup stopped. Details: journalctl -u omarchy-macos-vm-setup\n'
+      fi
+      return 1
+      ;;
+    esac
+    if [[ -e $state_dir/done ]] && ! creating; then
+      printf '\n  Nothing is running right now. %s\n' "$(pending_step | head -1)"
+      return 0
+    fi
+    sleep "${OMARCHY_MACOS_VM_PROGRESS_POLL:-2}"
+  done
+}
+
 # What to do on the stock kernel once the VM is imported.
 restart_step() {
   if oneshot_armed; then
@@ -191,7 +362,11 @@ wait_until_up() {
 # What is left before the VM exists, as one line for a notification.
 pending_step() {
   if [[ ! -e $state_dir/done ]]; then
-    echo "Set up the stack first: Install > macOS in the Omarchy menu."
+    case $(system_stage) in
+    waiting-for-internet) echo "Waiting for internet to set up the macOS VM: connect to Wi-Fi." ;;
+    installing | retrying) echo "Installing the macOS VM stack; the VM is created next." ;;
+    *) echo "Set up the stack first: Install > macOS in the Omarchy menu." ;;
+    esac
   elif bundle_ingested || vmxfer_ready; then
     if bundle_ingested && ! on_side_kernel; then
       restart_step
@@ -437,6 +612,19 @@ create_macos() {
       return 1
     }
   fi
+  # omvm setup would ask for the account on a terminal its output no longer reaches.
+  if [[ -z $(guest_user) ]] && ! account_created; then
+    local account
+    [[ -t 0 ]] && account=$(gum input --header="Enter the macOS account name:" --value="$(id -un)" 2>/dev/null)
+    valid_account "${account:-}" || account=$(id -un)
+    save_guest_user "$account" || return 1
+  fi
+  : >"$create_log"
+  if bundle_ingested; then
+    set_progress setting-up 36 "Starting the setup"
+  else
+    set_progress importing 1 "Starting the import"
+  fi
 
   if ! bundle_ingested; then
     local available mnt
@@ -448,10 +636,12 @@ create_macos() {
     fi
     mnt=$(vmxfer_mount)
     [[ -n $mnt && -d $mnt ]] && export MNT=$mnt
+    set_progress importing 2 "Importing the VM restored in macOS (10-20 minutes)"
     notify "Creating the macOS VM" "Importing the VM restored in macOS (omvm ingest)"
     echo "Importing the VM restored in macOS (omvm ingest; this can take 10-20 minutes)..."
-    omvm ingest || {
+    tracked omvm ingest || {
       echo "❌ omvm ingest failed." >&2
+      set_progress failed "$(progress_value percent)" "omvm ingest failed"
       notify -u critical "macOS VM" "omvm ingest failed; run omarchy-macos-vm create to retry"
       return 1
     }
@@ -460,30 +650,36 @@ create_macos() {
     echo ""
     echo "The rest needs the macOS VM kernel ($side_kernel)."
     restart_step
-    notify -u critical -t 0 "macOS VM: reboot to finish" "$(restart_step)"
+    set_progress restart-needed 35 "$(restart_step)"
+    notify -u critical -t 0 "macOS VM: restart to finish" "$(restart_step)"
     return 2
   fi
 
   local xcode=()
   [[ -f $omvm_images/Xcode.dmg ]] && xcode=(--xcode)
+  set_progress setting-up 40 "Setting up the guest (10-30 minutes)"
   notify "Creating the macOS VM" "Setting up the guest (omvm setup${xcode:+ --xcode}); this takes 10-30 minutes"
   echo "Setting up the guest (omvm setup ${xcode[*]})..."
-  if ! omvm setup "${xcode[@]}"; then
+  if ! tracked omvm setup "${xcode[@]}"; then
     echo "❌ omvm setup failed." >&2
+    set_progress failed "$(progress_value percent)" "omvm setup failed"
     notify -u critical "macOS VM" "omvm setup failed; run omarchy-macos-vm create to retry"
     return 1
   fi
 
-  CPUS=$(setting CPUS 8) RAM_GIB=$(setting RAM_GIB 16) omvm virt "$vm_name" || {
+  set_progress setting-up 85 "Defining the VM"
+  CPUS=$(setting CPUS 8) RAM_GIB=$(setting RAM_GIB 16) tracked omvm virt "$vm_name" || {
     echo "❌ omvm virt failed." >&2
+    set_progress failed "$(progress_value percent)" "omvm virt failed"
     notify -u critical "macOS VM" "omvm virt failed; run omarchy-macos-vm create to retry"
     return 1
   }
   write_desktop_entry
   date -u +%FT%TZ >"$user_state/vm-created"
+  set_progress ready 100 "The macOS VM is ready"
   echo ""
   echo "macOS VM is ready! Launch 'macOS' via Super + Space"
-  notify "macOS VM is ready" "Opening it now; later, launch macOS via Super + Space"
+  notify "macOS VM ready — open it from Super+Space" "Opening it now; later, choose macOS in Super + Space"
   # Unattended: open it the way the "macOS" launcher entry does, once.
   if ((auto)) && [[ -z ${OMARCHY_MACOS_VM_NO_LAUNCH:-} ]]; then
     systemd-run --user --unit=omarchy-macos-vm-launch --collect --quiet \
@@ -539,7 +735,16 @@ launch_macos() {
   fi
 
   if ! vm_exists; then
-    local steps open=()
+    local steps open=() running
+    running=$(in_progress)
+    if [[ -n $running ]]; then
+      # Clicked while the VM is being made: say where it is and show the progress.
+      echo "The macOS VM is still being set up ($(progress_summary "$running"))." >&2
+      notify "macOS VM" "Still setting up ($(progress_summary "$running"))…" \
+        --exec "omarchy-launch-floating-terminal-with-presentation 'omarchy-macos-vm progress'"
+      open_progress
+      exit 0
+    fi
     steps=$(pending_step)
     if [[ -e $state_dir/done ]] && { bundle_ingested || vmxfer_ready; } && on_side_kernel; then
       open=(--exec "omarchy-launch-floating-terminal-with-presentation 'omarchy-macos-vm create'")
@@ -673,6 +878,7 @@ status_macos() {
 case "${1:-}" in
 install) install_macos ;;
 create) create_macos "${2:-}" ;;
+progress) show_progress ;;
 remove) remove_macos "${2:-}" ;;
 launch | start) launch_macos "${2:-}" ;;
 stop | down) stop_macos ;;

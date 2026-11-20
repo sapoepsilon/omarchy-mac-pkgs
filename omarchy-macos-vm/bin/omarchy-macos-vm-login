@@ -7,6 +7,9 @@
 # defines it, telling the owner in notifications. On the stock kernel it stops
 # after the import and asks for one restart (the side kernel is armed to boot
 # once by itself). Its log: journalctl --user -u omarchy-macos-vm-creating.
+# Like the Windows VM install, the progress shows in a floating terminal
+# (omarchy-macos-vm progress). omarchy-macos-vm-create.path also runs this
+# during a session, when the system side becomes ready after the login.
 
 set -uo pipefail
 
@@ -16,6 +19,7 @@ created=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-macos-vm/vm-created
 side_kernel_param=${OMARCHY_MACOS_VM_KVM_PARAM:-/sys/module/kvm/parameters/emulate_nisv_ldst}
 vm_name=${OMVM_VM:-macos}
 unit=omarchy-macos-vm-creating
+progress_cmd="omarchy-launch-floating-terminal-with-presentation 'omarchy-macos-vm progress'"
 
 # The notification daemon (Omarchy's shell) can come up after this unit: wait
 # for it (OMARCHY_MACOS_VM_NOTIFY_WAIT seconds), and log what was sent.
@@ -26,7 +30,10 @@ notify() {
     sleep 2
   done
   echo "notification: $*"
-  omarchy-notification-send "$@" 2>/dev/null || notify-send "$@" 2>/dev/null || true
+  omarchy-notification-send "$@" 2>/dev/null && return 0
+  local args=() a
+  for a in "$@"; do [[ $a == --exec ]] && break; args+=("$a"); done
+  notify-send "${args[@]}" 2>/dev/null || true
 }
 
 if omvm mode "$vm_name" >/dev/null 2>&1; then
@@ -60,7 +67,15 @@ fi
 if systemctl --user is-active --quiet "$unit.service"; then
   exit 0
 fi
-notify "Creating the macOS VM" "The restored VM is on VMXFER: finishing it in the background (10-40 minutes)."
 systemctl --user reset-failed "$unit.service" 2>/dev/null || true
+# create exits 2 when only the restart into the side kernel is left: a wait, not a failure.
 systemd-run --user --unit="$unit" --collect --quiet --description="Omarchy: create the macOS VM" \
-  "$(command -v omarchy-macos-vm)" create --auto
+  --property=SuccessExitStatus=2 "$(command -v omarchy-macos-vm)" create --auto || exit 1
+notify "Creating the macOS VM" "Finishing it in the background (10-40 minutes); click to see the progress." --exec "$progress_cmd"
+# The progress view, as the Windows VM install shows its own in a terminal.
+# Its own unit: this one ends in seconds, and would take the terminal with it.
+if [[ -n ${WAYLAND_DISPLAY:-} && -z ${OMARCHY_MACOS_VM_NO_TERMINAL:-} ]]; then
+  systemd-run --user --unit=omarchy-macos-vm-progress-view --collect --quiet \
+    omarchy-launch-floating-terminal-with-presentation "omarchy-macos-vm progress" ||
+    echo "could not open the progress view: omarchy-macos-vm progress" >&2
+fi
