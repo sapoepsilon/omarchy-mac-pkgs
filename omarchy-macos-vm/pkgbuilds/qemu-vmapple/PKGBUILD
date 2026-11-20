@@ -9,7 +9,7 @@
 
 pkgname=qemu-vmapple
 pkgver=10.1.50.r1b41f5f5
-pkgrel=2
+pkgrel=3
 pkgdesc="QEMU vmapple machine on KVM with the reims-vgpu GPU, for omvm's macOS guests"
 arch=('aarch64')
 url="https://github.com/sapoepsilon/omvm"
@@ -58,13 +58,18 @@ build() {
 
 package() {
   install -Dm755 qemu/build/qemu-system-aarch64 "$pkgdir$_prefix/qemu-system-aarch64"
-  cp -a qemu/build/qemu-bundle "$pkgdir$_prefix/qemu-bundle"
+  # meson's qemu-bundle is a tree of absolute symlinks into the build directory;
+  # copy the files they point to, or the package breaks once $srcdir is gone.
+  cp -rL qemu/build/qemu-bundle "$pkgdir$_prefix/qemu-bundle"
   # The bundle's own binaries duplicate the one above; omvm passes -L to its data.
   rm -rf "$pkgdir$_prefix/qemu-bundle/usr/local/bin"
   install -Dm755 reims-dist/lib/libreims_vgpu.so "$pkgdir$_prefix/lib/libreims_vgpu.so"
   install -Dm644 -t "$pkgdir$_prefix/share/reims-vgpu" reims-dist/share/reims-vgpu/*
   # The option ROM next to QEMU's firmware too, where -L finds romfiles.
   install -Dm644 -t "$pkgdir$_prefix/qemu-bundle/usr/local/share/qemu" reims-dist/share/reims-vgpu/*.rom
+  if find "$pkgdir$_prefix" -type l | grep -q .; then
+    error "symlinks left in $_prefix"; return 1
+  fi
   install -Dm644 qemu/COPYING "$pkgdir/usr/share/licenses/$pkgname/COPYING"
   install -Dm644 reims/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE.reims-vgpu"
 }
