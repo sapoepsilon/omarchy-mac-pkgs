@@ -14,6 +14,12 @@ The installer cannot write the root filesystem. When its macOS VM box is ticked 
 
 Optional keys, for a marker written by hand or by an image builder: `repo` (a directory of packages, or an `https://` pacman repository) and `user`.
 
+From the installer the marker can also carry the macOS account the owner chose under the "Set up a macOS VM" tick: `guest_user` and `guest_password` (first boot copies them from the ESP's `omarchy/macos-vm-credentials`, deletes that file and makes the marker 0600). `omarchy-macos-vm-credentials` (root; run by the setup and by `omarchy-macos-vm-vmxfer.service` at every boot until it has worked) writes them to the owner's `~/.config/omarchy/macos-vm-credentials` (0600, `USERNAME=`/`PASSWORD=`, like the Windows VM's `~/.config/windows/credentials`) and removes the password from the marker. The owner is the marker's `user`, else the first account with a UID from 1000; until that account exists `/var/lib/omarchy/macos-vm/credentials-pending` makes `create --auto` wait instead of using the defaults.
+
+## The macOS account
+
+Like `omarchy-windows-vm`, the account has a username and a password with defaults: the wizard (Install › macOS) asks for both, a blank username is this Omarchy user's name and a blank password is `macos`; `create --auto` uses the stored account (the installer's or the wizard's) or the same defaults. The account is kept in `~/.config/omarchy/macos-vm-credentials` (0600) and handed to omvm (`OMVM_GUEST_USER` in `~/.config/omvm/gui.env`, the password in `~/.local/share/omvm/guest-password`, 0600) before `omvm setup` creates it. omvm logs it in automatically (loginwindow's `autoLoginUser` and `/etc/kcpassword`) and marks the post-login Setup Assistant panes seen, so the VM opens on the desktop; the password unlocks the screen and works for sudo. `omarchy-macos-vm status` and the progress view's Ready screen show the username and password. A VM made before this keeps its generated password (status shows it from omvm's `guest-password`); `omvm autologin macos` turns the automatic login on in it.
+
 ## What it does
 
 `omarchy-macos-vm-setup.service` (enabled by `80-omarchy-macos-vm.preset`, gated on the marker, ordered after `omarchy-mac-first-boot.service` and the network) runs `/usr/lib/omarchy-macos-vm/omarchy-macos-vm-setup`:

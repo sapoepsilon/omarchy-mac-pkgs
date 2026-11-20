@@ -12,7 +12,9 @@
 # The marker is JSON, {"version":1,"requested_by":"installer"}, written by
 # omarchy-mac-first-boot from install.conf's macos_vm=1. Optional keys:
 # "repo" (a directory of packages, or an https:// pacman repository) and
-# "user" (the owner the per-user step is for).
+# "user" (the owner the per-user step is for). From the installer it may also
+# carry "guest_user" and "guest_password" (the macOS account; the marker is then
+# 0600), which omarchy-macos-vm-credentials hands to the owner.
 
 set -uo pipefail
 
@@ -28,6 +30,7 @@ packages=(linux-aurora-vmapple qemu-vmapple mesa-honeykrisp-vmapple omvm)
 optional_packages=(virt-manager)
 side_kernel=linux-aurora-vmapple
 users_helper=${OMARCHY_MACOS_VM_USERS:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-users}
+credentials_helper=${OMARCHY_MACOS_VM_CREDENTIALS:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-credentials}
 # How long one run waits for internet before it exits 75 and the unit restarts.
 network_wait=${OMARCHY_MACOS_VM_NETWORK_WAIT:-900}
 
@@ -266,6 +269,10 @@ main() {
   rm -f "$state_dir/last-error"
   set_status done
   systemctl disable omarchy-macos-vm-setup.service >/dev/null 2>&1 || true
+  # The installer's macOS account to the owner, before create --auto needs it.
+  if [[ -x $credentials_helper ]]; then
+    "$credentials_helper" || say "could not hand over the macOS VM account yet; the next boot retries"
+  fi
   # Look on VMXFER now, not at the next boot: it mounts it for ingest and arms
   # the side kernel's one-time boot, so the first login can start the import.
   systemctl start --no-block omarchy-macos-vm-vmxfer.service >/dev/null 2>&1 || true

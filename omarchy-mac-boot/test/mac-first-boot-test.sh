@@ -312,6 +312,41 @@ expect_handoff "an install.conf with an unknown macos_vm value"
 [[ ! -e $root/etc/omarchy/macos-vm.enabled ]] || fail "macos_vm=yes writes no marker"
 echo 'ok - macos_vm=1 writes /etc/omarchy/macos-vm.enabled; its absence or another value writes nothing'
 
+# ── the installer's macOS account rides along in the marker, root-only ─────
+creds=macos-vm-credentials
+new_case macos-vm-credentials
+write_esp 'format=1' 'encrypt=0' 'macos_vm=1'
+printf '%s\n' 'macos_vm_user=izzy' 'macos_vm_password=ab"c\d e' >"$root/boot/efi/omarchy/$creds"
+expect_handoff "an install.conf with macos_vm=1 and a credentials file"
+[[ $(<"$root/etc/omarchy/macos-vm.enabled") == '{"version":1,"requested_by":"installer","guest_user":"izzy","guest_password":"ab\"c\\d e"}' ]] ||
+  fail "the marker carries the account" "$(cat "$root/etc/omarchy/macos-vm.enabled")"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["guest_password"] == "ab\"c\\d e", d' \
+  "$root/etc/omarchy/macos-vm.enabled" || fail "the marker is JSON with the password as typed"
+[[ $(stat -c %a "$root/etc/omarchy/macos-vm.enabled") == 600 ]] || fail "a marker with a password is 0600"
+[[ ! -e $root/boot/efi/omarchy/$creds ]] || fail "the ESP credentials file is deleted"
+! grep -q password "$root/var/lib/omarchy/mac-first-boot/install.conf" || fail "install.conf never holds the password"
+new_case macos-vm-credentials-invalid
+write_esp 'format=1' 'encrypt=0' 'macos_vm=1'
+printf '%s\n' 'macos_vm_user=Bad User' 'macos_vm_password=x' >"$root/boot/efi/omarchy/$creds"
+expect_handoff "an invalid credentials file"
+[[ $(<"$root/etc/omarchy/macos-vm.enabled") == '{"version":1,"requested_by":"installer"}' ]] ||
+  fail "an invalid account is left out of the marker"
+[[ $(stat -c %a "$root/etc/omarchy/macos-vm.enabled") == 644 ]] || fail "a marker without a password stays 0644"
+[[ ! -e $root/boot/efi/omarchy/$creds ]] || fail "an invalid ESP credentials file is deleted too"
+new_case macos-vm-credentials-quote
+write_esp 'format=1' 'encrypt=0' 'macos_vm=1'
+printf '%s\n' 'macos_vm_user=izzy' "macos_vm_password=it's" >"$root/boot/efi/omarchy/$creds"
+expect_handoff "a password with a single quote"
+[[ $(<"$root/etc/omarchy/macos-vm.enabled") == '{"version":1,"requested_by":"installer"}' ]] ||
+  fail "a password with ' is refused (omvm types it inside single quotes)"
+new_case macos-vm-credentials-unwanted
+write_esp 'format=1' 'encrypt=0'
+printf '%s\n' 'macos_vm_user=izzy' 'macos_vm_password=macos' >"$root/boot/efi/omarchy/$creds"
+expect_handoff "a credentials file without macos_vm=1"
+[[ ! -e $root/etc/omarchy/macos-vm.enabled && ! -e $root/boot/efi/omarchy/$creds ]] ||
+  fail "without macos_vm=1 no marker, and the ESP credentials file is still deleted"
+echo 'ok - the ESP macos-vm-credentials file goes into a 0600 marker and is deleted from the ESP'
+
 # ── format ≠ 1 stays pending ───────────────────────────────────────────────
 new_case bad-format
 write_esp 'format=2' 'encrypt=1'

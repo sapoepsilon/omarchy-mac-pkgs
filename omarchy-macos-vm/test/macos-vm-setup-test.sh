@@ -44,6 +44,7 @@ stub pacman-conf 'if [[ $1 == --repo-list ]]; then echo core; else echo "https:/
 stub getent 'echo "getent $*" >>"$TEST_CALLS"; [[ -z ${TEST_OFFLINE:-} ]]'
 stub curl 'printf 404'
 stub users 'echo "users $*" >>"$TEST_CALLS"'
+stub credentials 'echo "credentials $*" >>"$TEST_CALLS"'
 stub omarchy-apple-silicon-boot-check 'echo "boot-check $* pending=$OMARCHY_BOOT_CHECK_ALLOW_PENDING_REBOOT" >>"$TEST_CALLS"; [[ -z ${TEST_BOOT_CHECK_FAIL:-} ]]'
 
 new_root() {
@@ -63,7 +64,7 @@ add_archives() {
 run_setup() {
   set +e
   env -u HOME OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_ESP="$root/boot/efi" OMARCHY_MACOS_VM_SKIP_HW=1 \
-    OMARCHY_MACOS_VM_USERS="$stub_bin/users" OMARCHY_MACOS_VM_NETWORK_WAIT="${NETWORK_WAIT:-0}" \
+    OMARCHY_MACOS_VM_USERS="$stub_bin/users" OMARCHY_MACOS_VM_CREDENTIALS="$stub_bin/credentials" OMARCHY_MACOS_VM_NETWORK_WAIT="${NETWORK_WAIT:-0}" \
     TEST_CALLS="$calls" TEST_INSTALLED="$test_tmp/installed" PATH="$stub_bin:$PATH" \
     bash "$setup" >"$test_tmp/out" 2>&1
   status=$?
@@ -98,6 +99,7 @@ grep -q 'BOOT_ORDER\|kernel default' "$calls" && fail "the default boot entry is
 grep -q '^systemctl start --no-block omarchy-macos-vm-vmxfer.service' "$calls" || fail "the setup looks on VMXFER right away" "$(cat "$calls")"
 grep -q '^getent ahosts mirror.example.invalid' "$calls" || fail "the setup checks that the mirror resolves" "$(cat "$calls")"
 grep -Fxq 'users kick' "$calls" || fail "the setup starts the per-user steps in running sessions" "$(cat "$calls")"
+grep -Fxq 'credentials ' "$calls" || fail "the setup hands the installer's macOS account to the owner" "$(cat "$calls")"
 grep -Fxq 'stage=done' "$root/var/lib/omarchy/macos-vm/status" || fail "the status says done"
 pass "a marker installs the ESP packages, builds the side-kernel entry, checks the boot chain and stages the macOS step"
 
@@ -205,7 +207,7 @@ run_vmxfer() {
   : >"$calls"
   set +e
   env OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_MACOS_VM_VMXFER_DIR="$xfer" PATH="$stub_bin:$PATH" \
-    OMARCHY_MACOS_VM_ONESHOT="$stub_bin/oneshot" OMARCHY_MACOS_VM_USERS="$stub_bin/users" TEST_CALLS="$calls" \
+    OMARCHY_MACOS_VM_ONESHOT="$stub_bin/oneshot" OMARCHY_MACOS_VM_USERS="$stub_bin/users" OMARCHY_MACOS_VM_CREDENTIALS="$stub_bin/credentials" TEST_CALLS="$calls" \
     bash "$vmxfer" >"$test_tmp/out" 2>&1
   status=$?
   set -e
@@ -215,6 +217,7 @@ stub lsblk 'printf "/dev/nvme0n1p2 \n/dev/nvme0n1p3 VMXFER\n"'
 run_vmxfer
 (( status == 0 )) && [[ ! -e $root/var/lib/omarchy/macos-vm/vmxfer-ready ]] && ! grep -q oneshot "$calls" ||
   fail "an empty VMXFER is not ready and arms nothing" "$(cat "$test_tmp/out")"
+grep -Fxq 'credentials ' "$calls" || fail "every boot retries handing the installer's macOS account over" "$(cat "$calls")"
 : >"$xfer/vmxfer.sha256"; : >"$xfer/tahoe-26.4-25E246-restore.tar.gz"
 run_vmxfer
 grep -q '^device=/dev/nvme0n1p3' "$root/var/lib/omarchy/macos-vm/vmxfer-ready" &&

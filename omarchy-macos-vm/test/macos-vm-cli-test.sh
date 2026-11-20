@@ -77,6 +77,45 @@ run_cmd progress
 (( status == 0 )) && grep -Fq 'macOS VM ready: open it from Super + Space' "$test_tmp/out" || fail "the progress view ends at Ready" "$(cat "$test_tmp/out")"
 pass "on the side kernel create records Setting up and Ready"
 
+# The account: create --auto without one stored uses this user's name and "macos",
+# keeps them 0600 for the owner, hands them to omvm, and shows them when Ready.
+creds=$home/.config/omarchy/macos-vm-credentials
+me=$(id -un); [[ $me =~ ^[a-z_][a-z0-9_-]{0,30}$ ]] || me=macos
+[[ $(<"$creds") == $'USERNAME='"$me"$'\nPASSWORD=macos' ]] || fail "create --auto stores the default account" "$(cat "$creds")"
+[[ $(stat -c %a "$creds") == 600 ]] || fail "the credentials file is 0600"
+[[ $(<"$home/.local/share/omvm/guest-password") == macos && $(stat -c %a "$home/.local/share/omvm/guest-password") == 600 ]] ||
+  fail "omvm gets the password in its 0600 guest-password"
+grep -Fxq "OMVM_GUEST_USER=$me" "$home/.config/omvm/gui.env" || fail "omvm gets the username in gui.env"
+grep -Fq "  Username:  $me" "$test_tmp/out" && grep -Fq '  Password:  macos' "$test_tmp/out" ||
+  fail "the Ready screen shows the username and password" "$(cat "$test_tmp/out")"
+pass "create --auto defaults to this user's name and the password macos, 0600, and Ready shows them"
+
+# The installer's account (handed over by omarchy-macos-vm-credentials) wins.
+reset
+touch "$state/done" "$kvm_param"
+mkdir -p "$images/b-restore" "${creds%/*}"; touch "$images/b-restore/.ingested"
+printf 'USERNAME=izzy\nPASSWORD=pa ss=word\n' >"$creds"; chmod 600 "$creds"
+run_cmd create --auto
+(( status == 0 )) || fail "create with the installer's account" "$(cat "$test_tmp/out")"
+[[ $(<"$home/.local/share/omvm/guest-password") == 'pa ss=word' ]] && grep -Fxq 'OMVM_GUEST_USER=izzy' "$home/.config/omvm/gui.env" ||
+  fail "omvm gets the installer's account" "$(cat "$home/.config/omvm/gui.env")"
+stub gum 'shift; while [[ $1 == --* ]]; do shift 2; done; printf "%s\n" "$@"'
+printf 'running\n' >"$vm/state"
+run_cmd status
+grep -Fxq 'Username:  izzy' "$test_tmp/out" && grep -Fxq 'Password:  pa ss=word' "$test_tmp/out" ||
+  fail "status shows the username and password" "$(cat "$test_tmp/out")"
+rm -f "$stub_bin/gum" "$vm/state"
+pass "a stored account goes to omvm as is, and status shows it"
+
+# Handed over at the next boot: create waits instead of making the account with defaults.
+reset
+touch "$state/done" "$kvm_param" "$state/credentials-pending"
+mkdir -p "$images/b-restore"; touch "$images/b-restore/.ingested"
+run_cmd create --auto
+(( status == 2 )) && ! grep -q '^omvm setup' "$log" && [[ ! -e $creds ]] ||
+  fail "create waits for the installer's account" "$(cat "$test_tmp/out"; cat "$log")"
+pass "with the installer's account still to be handed over, create waits for the restart"
+
 reset
 touch "$state/done" "$kvm_param"
 mkdir -p "$images/b-restore"; touch "$images/b-restore/.ingested"

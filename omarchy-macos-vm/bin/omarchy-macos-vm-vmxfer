@@ -20,8 +20,15 @@ stamp=$state_dir/vmxfer-ready
 mnt=${OMARCHY_MACOS_VM_VMXFER_MNT:-/run/omarchy-macos-vm/vmxfer}
 oneshot=${OMARCHY_MACOS_VM_ONESHOT:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-oneshot-boot}
 users_helper=${OMARCHY_MACOS_VM_USERS:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-users}
+credentials_helper=${OMARCHY_MACOS_VM_CREDENTIALS:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-credentials}
 
 say() { printf 'omarchy-macos-vm-vmxfer: %s\n' "$*"; }
+
+# Every boot until it is done: the installer's macOS account to the owner
+# (the owner may not have existed when omarchy-macos-vm-setup ran).
+if [[ -x $credentials_helper ]]; then
+  "$credentials_helper" || say "could not hand over the macOS VM account yet"
+fi
 
 device=$(lsblk -rno PATH,LABEL | awk '$2=="VMXFER"{print $1; exit}')
 if [[ -z $device ]]; then

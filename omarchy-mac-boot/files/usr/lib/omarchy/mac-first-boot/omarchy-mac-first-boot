@@ -19,6 +19,11 @@ error_file=$state_dir/last-error
 log_file=$root/var/log/omarchy-mac-first-boot.log
 provisioning_dir=$root/var/lib/omarchy/provisioning
 esp_conf=$root/boot/efi/omarchy/install.conf
+# The installer's macOS VM account (macos_vm_user=, macos_vm_password=). Kept
+# out of install.conf on purpose: that file is read by the initramfs and kept
+# world-readable on the root, and FAT has no per-file permissions, so the
+# password sits in its own file that first boot deletes once it is consumed.
+esp_vm_credentials=$root/boot/efi/omarchy/macos-vm-credentials
 keyring_dir=$root/etc/pacman.d/gnupg
 keyring_record=$state_dir/keyring
 keyring_import_dir=$root/usr/share/pacman/keyrings
@@ -135,14 +140,53 @@ parse_install_conf() {
 request_macos_vm() {
   case $1 in
     1)
-      [[ -f $macos_vm_marker ]] && return 0
-      install -d -m 0755 "${macos_vm_marker%/*}" || fail "could not create ${macos_vm_marker%/*}"
-      write_atomically "$macos_vm_marker" 0644 '{"version":1,"requested_by":"installer"}'$'\n'
-      log "install.conf requests the macOS VM stack; wrote $macos_vm_marker"
+      if [[ ! -f $macos_vm_marker ]]; then
+        local body mode=0644 extra
+        extra=$(macos_vm_credentials)
+        [[ -z $extra ]] || mode=0600
+        body='{"version":1,"requested_by":"installer"'"$extra"'}'$'\n'
+        install -d -m 0755 "${macos_vm_marker%/*}" || fail "could not create ${macos_vm_marker%/*}"
+        write_atomically "$macos_vm_marker" "$mode" "$body"
+        log "install.conf requests the macOS VM stack; wrote $macos_vm_marker${extra:+ (with the macOS account from the installer)}"
+      fi
       ;;
     "" | 0) ;;
     *) log "install.conf sets macos_vm=$1, which is not 0 or 1; no macOS VM requested" ;;
   esac
+  # Consumed (or not wanted): the plaintext password does not stay on the ESP.
+  if [[ -e $esp_vm_credentials || -L $esp_vm_credentials ]]; then
+    rm -f "$esp_vm_credentials" || log "could not delete $esp_vm_credentials"
+  fi
+}
+
+# The ESP credentials file as JSON members for the marker (',"guest_user":...,
+# "guest_password":...'), or nothing. A missing, odd or invalid file requests the
+# VM without them (omarchy-macos-vm then uses its defaults) and never stops first
+# boot. Values are printable ASCII, so JSON needs only \ and " escaped.
+macos_vm_credentials() {
+  local line key value user="" password=""
+  [[ -f $esp_vm_credentials && ! -L $esp_vm_credentials ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    key=${line%%=*}
+    value=${line#*=}
+    case $key in
+      macos_vm_user) user=$value ;;
+      macos_vm_password) password=$value ;;
+    esac
+  done <"$esp_vm_credentials"
+  local LC_ALL=C
+  if [[ ! $user =~ ^[a-z_][a-z0-9_-]{0,30}$ ]]; then
+    [[ -z $user ]] || log "macos-vm-credentials: invalid macos_vm_user; ignoring the file"
+    return 0
+  fi
+  if [[ ! $password =~ ^[[:print:]]{1,64}$ || $password == *"'"* ]]; then
+    log "macos-vm-credentials: invalid macos_vm_password; ignoring the file"
+    return 0
+  fi
+  password=${password//\\/\\\\}
+  password=${password//\"/\\\"}
+  printf ',"guest_user":"%s","guest_password":"%s"' "$user" "$password"
 }
 
 # The encrypt hook already read the ESP copy in this boot's initramfs and left

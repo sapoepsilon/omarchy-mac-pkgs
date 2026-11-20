@@ -27,6 +27,13 @@ marker=${OMARCHY_MACOS_VM_MARKER:-/etc/omarchy/macos-vm.enabled}
 state_dir=${OMARCHY_MACOS_VM_STATE:-/var/lib/omarchy/macos-vm}
 user_state=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-macos-vm
 config_file=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/macos-vm.conf
+# The macOS account's name and password, for the owner (0600, like
+# omarchy-windows-vm's ~/.config/windows/credentials): the install wizard, the
+# installer (handed over by omarchy-macos-vm-credentials) or the defaults below.
+credentials_file=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/macos-vm-credentials
+# Like the Windows VM's "admin": what a blank password field means. The username
+# defaults to this Omarchy user's name.
+DEFAULT_PASSWORD=macos
 omvm_cfg=${XDG_CONFIG_HOME:-$HOME/.config}/omvm/gui.env
 omvm_data=${OMVM_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/omvm}
 omvm_images=${OMVM_IMAGES:-$omvm_data/images}
@@ -96,7 +103,8 @@ notify() {
 valid_ram() { [[ $1 =~ ^[0-9]{1,3}G$ ]] && ((10#${1%G} >= 4)); }
 valid_cores() { [[ $1 =~ ^[0-9]{1,2}$ ]] && ((10#$1 >= 1)); }
 valid_account() { [[ $1 =~ ^[a-z_][a-z0-9_-]{0,30}$ ]]; }
-valid_password() { [[ $1 =~ ^[[:print:]]{1,64}$ ]]; }
+# omvm types the password inside single quotes on the guest's console: no '.
+valid_password() { [[ $1 =~ ^[[:print:]]{1,64}$ && $1 != *"'"* ]]; }
 
 # KEY [DEFAULT]: a setting from the macOS VM config (RAM_GIB, CPUS).
 setting() {
@@ -122,8 +130,55 @@ save_guest_user() {
 guest_user() { sed -n 's/^OMVM_GUEST_USER=//p' "$omvm_cfg" 2>/dev/null | tail -1; }
 
 # omvm setup creates the guest account (image -v0) with the password in this
-# file, generating one when it is missing.
+# file (generating one when it is missing) and logs it in automatically.
+omvm_password_file=$omvm_data/guest-password
 account_created() { compgen -G "$omvm_images/*-v0" >/dev/null; }
+
+# USER PASSWORD: keep them for the owner, 0600 (a temp file, then one rename).
+write_credentials() {
+  local dir=${credentials_file%/*} tmp
+  mkdir -p "$dir" || return 1
+  tmp=$(umask 077 && mktemp "$dir/.macos-vm-credentials.XXXXXX") || return 1
+  if ! printf 'USERNAME=%s\nPASSWORD=%s\n' "$1" "$2" >"$tmp" || ! chmod 0600 "$tmp" ||
+    ! mv -f -- "$tmp" "$credentials_file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# KEY: USERNAME or PASSWORD from the credentials file; the first = splits, so a
+# password may contain =.
+read_credential() {
+  local key value
+  [[ -f $credentials_file ]] || return 1
+  while IFS='=' read -r key value; do
+    [[ $key == "$1" ]] && { printf '%s' "$value"; return 0; }
+  done <"$credentials_file"
+  return 1
+}
+
+# Hand the stored account to omvm before omvm setup creates it: the name in
+# gui.env, the password in omvm's guest-password (0600).
+apply_credentials() {
+  local user password
+  user=$(read_credential USERNAME) && password=$(read_credential PASSWORD) || return 1
+  save_guest_user "$user" || return 1
+  mkdir -p "$omvm_data" && (umask 077 && printf '%s\n' "$password" >"$omvm_password_file") &&
+    chmod 0600 "$omvm_password_file"
+}
+
+# The account to show (status, the Ready screen): the stored one, else what an
+# older setup left (gui.env and omvm's generated guest-password).
+shown_username() { read_credential USERNAME || guest_user; }
+shown_password() { read_credential PASSWORD || head -1 "$omvm_password_file" 2>/dev/null; }
+credential_lines() {
+  printf 'Username:  %s\n' "$(shown_username)"
+  printf 'Password:  %s\n' "$(shown_password)"
+}
+
+# The installer chose the account, but omarchy-macos-vm-credentials (root) has
+# not handed it over yet: wait for it rather than make the account with defaults.
+credentials_pending() { [[ -e $state_dir/credentials-pending && ! -s $credentials_file ]]; }
 bundle_ingested() { compgen -G "$omvm_images/*-restore/.ingested" >/dev/null; }
 # The omarchy-macos-vm-vmxfer.service (root, at boot or on demand) looks on
 # VMXFER for the macOS step's output and leaves this stamp when it is there.
@@ -276,6 +331,11 @@ show_progress() {
     case $stage in
     ready)
       printf '\n  macOS VM ready: open it from Super + Space (macOS).\n'
+      if [[ -n $(shown_username) ]]; then
+        printf '\n'
+        credential_lines | sed 's/^/  /'
+        printf '  It logs in by itself; the password unlocks the screen and sudo.\n'
+      fi
       return 0
       ;;
     restart-needed)
@@ -481,25 +541,29 @@ install_macos() {
   fi
 
   if account_created; then
-    account=$(guest_user)
+    account=$(shown_username)
     password_display="(set when the account was created)"
   else
-    account=$(gum input --placeholder="macOS account name (Press enter to use default: $(guest_user || true))" --header="Enter the macOS account name:")
-    [[ -n $account ]] || account=$(guest_user)
-    [[ -n $account ]] || account=$(id -un)
+    local default_account
+    default_account=$(read_credential USERNAME || guest_user)
+    [[ -n $default_account ]] || default_account=$(id -un)
+    valid_account "$default_account" || default_account=$(id -un)
+    account=$(gum input --placeholder="macOS username (Press enter to use default: $default_account)" --header="Enter the macOS username:")
+    [[ -n $account ]] || account=$default_account
     if ! valid_account "$account"; then
-      echo "Invalid account name (lowercase letters, digits, - or _, up to 31 chars). Using default: $(id -un)"
-      account=$(id -un)
+      echo "Invalid username (lowercase letters, digits, - or _, up to 31 chars). Using default: $default_account"
+      account=$default_account
     fi
-    password=$(gum input --placeholder="Password (Press enter to generate one)" --password --header="Enter the macOS password:")
+    password=$(gum input --placeholder="Password (Press enter to use default: $DEFAULT_PASSWORD)" --password --header="Enter the macOS password:")
     if [[ -z $password ]]; then
-      password_display="(generated, in $omvm_data/guest-password)"
+      password=$DEFAULT_PASSWORD
+      password_display="(default: $DEFAULT_PASSWORD)"
     elif valid_password "$password"; then
       password_display="(user-defined)"
     else
-      echo "Invalid password (printable characters, up to 64). Generating one instead."
-      password=""
-      password_display="(generated, in $omvm_data/guest-password)"
+      echo "Invalid password (printable characters except ', up to 64). Using default: $DEFAULT_PASSWORD"
+      password=$DEFAULT_PASSWORD
+      password_display="(default: $DEFAULT_PASSWORD)"
     fi
   fi
 
@@ -514,8 +578,9 @@ install_macos() {
     "RAM:       $selected_ram" \
     "CPU:       $selected_cores cores" \
     "Disk:      160G (sparse, from the macOS restore)" \
-    "Account:   ${account:-(existing)}" \
-    "Password:  $password_display"
+    "Username:  ${account:-(existing)}" \
+    "Password:  $password_display" \
+    "Login:     automatic (the password unlocks the screen and sudo)"
 
   echo ""
   if ! gum confirm "Proceed with this configuration?"; then
@@ -528,16 +593,10 @@ install_macos() {
     exit 1
   }
   if ! account_created; then
-    save_guest_user "$account" || {
-      echo "❌ Failed to write $omvm_cfg." >&2
+    write_credentials "$account" "$password" && apply_credentials || {
+      echo "❌ Failed to store the macOS username and password ($credentials_file)." >&2
       exit 1
     }
-    if [[ -n ${password:-} ]]; then
-      mkdir -p "$omvm_data" && (umask 077 && printf '%s\n' "$password" >"$omvm_data/guest-password") || {
-        echo "❌ Failed to store the macOS password." >&2
-        exit 1
-      }
-    fi
   fi
 
   install_stack || exit 1
@@ -570,11 +629,23 @@ install_macos() {
   echo "Once finished, launch 'macOS' via Super + Space"
 }
 
-# --auto, at login with nobody at a terminal: the guest account is this
-# user's name and the VM gets half the RAM (4-16G) and all but two cores (2-8),
-# unless omarchy-macos-vm install already chose them.
+# --auto, at login with nobody at a terminal: the guest account is the one the
+# installer or the wizard stored, else this user's name with the password
+# "macos"; the VM gets half the RAM (4-16G) and all but two cores (2-8), unless
+# omarchy-macos-vm install already chose them.
 auto_defaults() {
-  if [[ -z $(guest_user) ]] && valid_account "$(id -un)"; then
+  local user
+  # The account: the stored one (the installer's or the wizard's), else this
+  # user's name and the default password, as the Windows VM does.
+  if ! account_created; then
+    if [[ ! -s $credentials_file ]]; then
+      user=$(guest_user)
+      valid_account "${user:-}" || user=$(id -un)
+      valid_account "$user" || user=macos
+      write_credentials "$user" "$DEFAULT_PASSWORD" || return 1
+    fi
+    apply_credentials || return 1
+  elif [[ -z $(guest_user) ]] && valid_account "$(id -un)"; then
     save_guest_user "$(id -un)" || return 1
   fi
   [[ -s $config_file ]] && return 0
@@ -606,6 +677,11 @@ create_macos() {
     return 1
   fi
   mkdir -p "$user_state"
+  if credentials_pending && ! account_created; then
+    echo "The macOS username and password from the installer are handed over at the next boot; restart, then the VM is finished at the next login." >&2
+    notify -u critical "macOS VM: restart to finish" "The account from the installer is handed over at the next boot."
+    return 2
+  fi
   if ((auto)); then
     auto_defaults || {
       echo "❌ Failed to save the macOS VM settings." >&2
@@ -613,11 +689,22 @@ create_macos() {
     }
   fi
   # omvm setup would ask for the account on a terminal its output no longer reaches.
-  if [[ -z $(guest_user) ]] && ! account_created; then
-    local account
-    [[ -t 0 ]] && account=$(gum input --header="Enter the macOS account name:" --value="$(id -un)" 2>/dev/null)
+  if ! account_created && [[ ! -s $credentials_file ]]; then
+    local account="" password=""
+    if [[ -t 0 ]]; then
+      account=$(gum input --header="Enter the macOS username:" --value="$(guest_user || id -un)" 2>/dev/null)
+      password=$(gum input --password --placeholder="Press enter to use default: $DEFAULT_PASSWORD" --header="Enter the macOS password:" 2>/dev/null)
+    fi
+    valid_account "${account:-}" || account=$(guest_user)
     valid_account "${account:-}" || account=$(id -un)
-    save_guest_user "$account" || return 1
+    valid_password "${password:-}" || password=$DEFAULT_PASSWORD
+    write_credentials "$account" "$password" || return 1
+  fi
+  if ! account_created; then
+    apply_credentials || {
+      echo "❌ Failed to hand the macOS account to omvm." >&2
+      return 1
+    }
   fi
   : >"$create_log"
   if bundle_ingested; then
@@ -679,6 +766,7 @@ create_macos() {
   set_progress ready 100 "The macOS VM is ready"
   echo ""
   echo "macOS VM is ready! Launch 'macOS' via Super + Space"
+  credential_lines
   notify "macOS VM ready — open it from Super+Space" "Opening it now; later, choose macOS in Super + Space"
   # Unattended: open it the way the "macOS" launcher entry does, once.
   if ((auto)) && [[ -z ${OMARCHY_MACOS_VM_NO_LAUNCH:-} ]]; then
@@ -707,7 +795,7 @@ remove_macos() {
     gum confirm --default=false "Also delete the guest images in $omvm_images ($(du -sh "$omvm_images" 2>/dev/null | cut -f1))?" && purge=1
   fi
   if ((purge)); then
-    rm -rf "$omvm_images" "$omvm_data/guest-password"
+    rm -rf "$omvm_images" "$omvm_password_file" "$credentials_file"
     echo "Guest images deleted."
   elif [[ -d $omvm_images ]]; then
     echo "Guest images kept in $omvm_images."
@@ -866,11 +954,14 @@ status_macos() {
       "Display:   $display" \
       "SSH:       omvm ssh $vm_name" \
       "Settings:  $(setting RAM_GIB 16)G RAM, $(setting CPUS 8) cores" \
+      "$(credential_lines | head -1)" \
+      "$(credential_lines | tail -1)" \
       "" \
       "To connect: omarchy-macos-vm launch" \
       "To stop:    omarchy-macos-vm stop"
   else
     echo "macOS VM is stopped (status: ${state:-unknown})"
+    credential_lines
     echo "To start: omarchy-macos-vm launch"
   fi
 }
