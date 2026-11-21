@@ -52,6 +52,12 @@ progress_file=$user_state/progress
 create_log=$user_state/create.log
 creating_unit=omarchy-macos-vm-creating
 progress_pid=${XDG_RUNTIME_DIR:-/tmp}/omarchy-macos-vm-progress.pid
+# Apple Account / iMessage in the guest (omvm docs/apple-services.md): the
+# owner's SEP identity and helper builds come from another install on this Mac
+# (`apple-services import`); with them here, create enrolls the new VM.
+apple_helper=${OMARCHY_MACOS_VM_APPLE_HELPER:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-apple-services}
+apple_provider=${XDG_CONFIG_HOME:-$HOME/.config}/omvm/apple-services/identity-provider.json
+apple_qemu=${OMVM_APPLE_QEMU:-/usr/lib/omvm-apple-services/qemu-system-aarch64}
 
 show_usage() {
   cat <<'USAGE'
@@ -68,6 +74,13 @@ Commands:
   create [--auto]      Finish the VM after the macOS step (ingest, setup, virt);
                        --auto picks the account, RAM and cores without asking
   progress             Follow the setup (stage, percent, log) until it is done
+  apple-services import SRC|old-root [--os-uuid UUID] [--qemu PATH]
+                       Bring the SEP identity and Apple helpers (Apple Account,
+                       iMessage) over from another Linux install on this Mac;
+                       old-root opens the other Omarchy install here read-only
+  apple-services enable
+                       Enroll the VM with them (restarts it)
+  apple-services status
   help                 Show this help message
 
 Examples:
@@ -761,6 +774,11 @@ create_macos() {
     notify -u critical "macOS VM" "omvm virt failed; run omarchy-macos-vm create to retry"
     return 1
   }
+  if apple_services_imported; then
+    set_progress setting-up 90 "Enrolling the VM for Apple Account sign-in"
+    tracked apple_services_enable ||
+      echo "⚠️  Apple services were not enabled; retry: omarchy-macos-vm apple-services enable" >&2
+  fi
   write_desktop_entry
   date -u +%FT%TZ >"$user_state/vm-created"
   set_progress ready 100 "The macOS VM is ready"
@@ -774,6 +792,67 @@ create_macos() {
       --description="Omarchy: open the macOS VM" omarchy-macos-vm launch ||
       echo "Could not open the macOS VM; launch 'macOS' via Super + Space" >&2
   fi
+}
+
+apple_services_imported() {
+  [[ -e /etc/omvm/sep-identity.conf && -s $apple_provider && -x $apple_qemu ]]
+}
+
+# The VM's FairPlay identifier is its IOPlatformUUID, read from the running
+# guest; enrollment needs every guest stopped, then the VM is redefined with
+# the identity device, the SEP socket and its FairPlay helper.
+apple_services_enable() {
+  apple_services_imported || {
+    echo "No Apple services on this Mac yet: omarchy-macos-vm apple-services import old-root" >&2
+    return 1
+  }
+  vm_exists || {
+    echo "The macOS VM $vm_name does not exist yet." >&2
+    return 1
+  }
+  if [[ -e $omvm_images/vms/$vm_name/apple_services ]] && "${VIRSH[@]}" dumpxml --inactive "$vm_name" 2>/dev/null |
+    grep -q "relay-socket=/run/omvm-fairplay-managed-$vm_name/"; then
+    echo "$vm_name already has the Apple services."
+    return 0
+  fi
+  local uuid
+  if [[ $(vm_state) != running ]]; then
+    "${VIRSH[@]}" start "$vm_name" >/dev/null || return 1
+  fi
+  wait_until_up || {
+    echo "❌ $vm_name did not come up over SSH." >&2
+    return 1
+  }
+  uuid=$(omvm ssh "$vm_name" "ioreg -rd1 -c IOPlatformExpertDevice" </dev/null |
+    sed -nE 's/.*"IOPlatformUUID" = "([0-9A-Fa-f-]{36})".*/\1/p' | head -1)
+  [[ ${#uuid} == 36 ]] || {
+    echo "❌ Could not read the guest's IOPlatformUUID." >&2
+    return 1
+  }
+  omvm stop "$vm_name" >/dev/null || return 1
+  sudo "$apple_helper" enable "$vm_name" --uuid "$uuid" || return 1
+  omvm virt "$vm_name" --experimental-apple-services || return 1
+  echo "$vm_name: Apple services on (Apple Account sign-in in System Settings)."
+}
+
+apple_services() {
+  local cmd=${1:-status}
+  shift || true
+  case $cmd in
+  import)
+    [[ -n ${1:-} ]] || {
+      echo "Usage: omarchy-macos-vm apple-services import SRC|old-root [--os-uuid UUID] [--qemu PATH]" >&2
+      return 1
+    }
+    sudo "$apple_helper" import "$@" --user "$(id -un)"
+    ;;
+  enable) apple_services_enable ;;
+  status) sudo "$apple_helper" status ;;
+  *)
+    echo "Usage: omarchy-macos-vm apple-services import|enable|status" >&2
+    return 1
+    ;;
+  esac
 }
 
 remove_macos() {
@@ -974,6 +1053,10 @@ remove) remove_macos "${2:-}" ;;
 launch | start) launch_macos "${2:-}" ;;
 stop | down) stop_macos ;;
 status) status_macos ;;
+apple-services)
+  shift
+  apple_services "$@"
+  ;;
 help | --help | -h | "") show_usage ;;
 *)
   echo "Unknown command: $1" >&2

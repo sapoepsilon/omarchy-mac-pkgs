@@ -43,6 +43,14 @@ The package also ships `/usr/bin/omarchy-macos-vm` (`install`, `create [--auto]`
 
 The stack setup itself never downloads Apple software and never creates a guest (that needs the macOS side). The default boot entry changes only for the one armed boot.
 
+## Apple Account and iMessage (experimental)
+
+Sign-in needs omvm's Linux SEP signer, UID1 provider and FairPlay helper (omvm `docs/apple-services.md`, `docs/apple-helpers.md`). The code ships in `omvm`; what cannot ship is per owner and per Mac: the enclave keybag and machine ref-key this Mac's SEP made for a Linux install (`/var/lib/aurora-sep-*.bin`), the Apple-issued certificate chain for that key, the reviewed UID1 provider/FairPlay backend builds and Apple's FairPlay assets they pin, the `apple-sep` build with the attestation export, the m1n1 image carrying the board's AES device tree, and the identity-enabled QEMU (`qemu-vmapple` has no identity/FairPlay patches). Without them a guest's sign-in fails with "Verification Failed / An unknown error occurred" (`ADIGetIDMSRouting -45061`, `AKAnisetteError`).
+
+`omarchy-macos-vm apple-services import old-root` copies all of it from the other Omarchy install on the same disk (opened read-only through its key file, then closed again; or pass the mounted root of any other install, `--os-uuid` if it cannot tell which stub the SEP identity belongs to). Secrets keep their 0600 root modes and are never printed; a file that already exists with other contents is never replaced. The import enables `omvm-sep-identity` and `omvm-uid1-provider` and says when a restart is needed (new m1n1 image, SEP attach with the imported identity). `/usr/lib/omarchy-macos-vm/omarchy-macos-vm-apple-services` does the root part.
+
+With that on the host, `create` enrolls the new VM by itself (its IOPlatformUUID is its FairPlay identifier, with an empty checkpoint) and redefines it with `omvm virt macos --experimental-apple-services`; for an existing VM run `omarchy-macos-vm apple-services enable` (restarts it). `apple-services status` shows what is there. Caveats: the provider is for the M1 Max (J314c) on the pinned `7.2.11-15vmapple-1-ARCH` kernel only, it keeps the AES engine until the next full restart and blocks suspend once used; the imported SEP session is shared with the install it came from, so use one install's guests at a time; the host certificate expires about 91 days after it was issued.
+
 ## Recipes
 
 `pkgbuilds/` holds the recipes for the stack and for this package; [BUILD.md](../BUILD.md) has the commands. `linux-aurora-vmapple` builds the owner's fork branch `sapoepsilon/linux-aurora` `vmapple/kvm-macos-guest`, whose two KVM commits are GPL-2.0.

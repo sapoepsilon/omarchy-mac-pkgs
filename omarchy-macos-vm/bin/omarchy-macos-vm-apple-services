@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Apple Account / iMessage prerequisites for omvm guests (run as root).
+
+    omarchy-macos-vm-apple-services status
+    omarchy-macos-vm-apple-services import SRC|old-root [--home DIR] [--user NAME]
+                                     [--os-uuid UUID] [--qemu PATH]
+    omarchy-macos-vm-apple-services enable VM --uuid IOPlatformUUID
+
+omvm's Linux SEP signer, UID1 provider and FairPlay helpers (omvm
+docs/apple-services.md, apple-helpers.md) need per-owner material that cannot
+ship in a package: the enclave keybag and machine ref-key this Mac's SEP made
+for a Linux install, the Apple-issued certificate chain for that key, the
+reviewed provider/backend builds, Apple's FairPlay assets and the
+identity-enabled QEMU. `import` copies them from another Linux install on this
+Mac (SRC is its mounted root; `old-root` opens the other Omarchy install on
+this disk read-only and imports from it). `enable` adds one stopped VM with its
+own identifier (its IOPlatformUUID) and an empty FairPlay checkpoint.
+
+Secrets are copied with their modes and never printed. Nothing is written to
+SRC. A file that already exists here with other contents is never replaced.
+"""
+import argparse
+import datetime
+import glob
+import hashlib
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import uuid
+import xml.etree.ElementTree as ET
+
+OMVM_SHARE = Path(os.environ.get('OMVM_SHARE', '/usr/lib/omvm/share'))
+LIBEXEC = Path('/usr/local/libexec')
+HELPERS = LIBEXEC / 'omvm-apple-helpers'
+MANIFEST = Path('/etc/omvm/apple-helpers.json')
+TEMPLATE = Path('/etc/omvm/apple-helpers.template.json')
+SEP_CONF = Path('/etc/omvm/sep-identity.conf')
+SEP_MODPROBE = Path('/etc/modprobe.d/omvm-apple-sep.conf')
+SEP_STATE = ['aurora-sep-keybag.bin', 'aurora-sep-refkey.bin', 'aurora-sep-refkey-v2.bin',
+             'aurora-sep-host-state.bin', 'aurora-sep-xart-owned.bin']
+IDENTIFIERS = Path('/var/lib/omvm/apple-services/identifiers')
+STAGE = Path('/var/lib/omvm/private-stage')
+QEMU_DIR = Path('/usr/lib/omvm-apple-services')
+PKG_QEMU_BUNDLE = Path('/usr/lib/qemu-vmapple/qemu-bundle')
+# Shared libraries the lab QEMU links that the packaged stack does not pull in.
+QEMU_LIBS = {'libvte-2.91': 'vte3', 'libvirglrenderer': 'virglrenderer',
+             'libcacard': 'libcacard', 'libusbredirparser': 'usbredir'}
+STAMP = datetime.date.today().strftime('%Y%m%d')
+reboot_reasons = []
+
+
+class Failure(Exception):
+    pass
+
+
+def require(ok, message):
+    if not ok:
+        raise Failure(message)
+
+
+def say(message):
+    print(message, flush=True)
+
+
+def run(args, **kw):
+    return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, **kw).stdout
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for block in iter(lambda: f.read(1 << 20), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def same(a, b):
+    return os.path.isfile(a) and os.path.isfile(b) and sha256(a) == sha256(b)
+
+
+def copy_file(src, dst, mode=None, owner=None):
+    """Copy one file without ever replacing different contents."""
+    src, dst = Path(src), Path(dst)
+    require(src.is_file() and not src.is_symlink(), f'missing in the source install: {src}')
+    if dst.exists():
+        require(same(src, dst), f'{dst} already exists here with other contents; left as it is')
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='.' + dst.name + '-', dir=dst.parent)
+    os.close(fd)
+    try:
+        shutil.copy2(src, tmp)
+        os.chmod(tmp, mode if mode is not None else src.stat().st_mode & 0o7777)
+        uid, gid = owner if owner else (0, 0)
+        os.chown(tmp, uid, gid)
+        os.replace(tmp, dst)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return True
+
+
+def copy_tree(src, dst):
+    src, dst = Path(src), Path(dst)
+    require(src.is_dir(), f'missing in the source install: {src}')
+    for path in sorted(src.rglob('*')):
+        target = dst / path.relative_to(src)
+        if path.is_symlink():
+            continue
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            os.chmod(target, path.stat().st_mode & 0o7777)
+        else:
+            copy_file(path, target)
+    os.chmod(dst, src.stat().st_mode & 0o7777)
+
+
+def write_private(path, data, mode=0o600, owner=(0, 0)):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
+    try:
+        os.fchmod(fd, mode)
+        os.fchown(fd, *owner)
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+
+def under(src, path):
+    return Path(str(src) + str(path))
+
+
+# --- the other install's preboot UUID (apple_sep's xART OS UUID) -------------
+
+def apfs_volumes(device):
+    """(uuid, name, role) of each APFS volume superblock on DEVICE."""
+    found = set()
+    with open(device, 'rb', buffering=0) as f:
+        while True:
+            chunk = f.read(4096 * 256)
+            if not chunk:
+                break
+            for i in range(0, len(chunk) - 4095, 4096):
+                if chunk[i + 32:i + 36] == b'APSB':
+                    b = chunk[i:i + 4096]
+                    found.add((str(uuid.UUID(bytes=b[240:256])).upper(),
+                               b[704:960].split(b'\0')[0].decode(errors='replace'),
+                               struct.unpack_from('<H', b, 964)[0]))
+    return found
+
+
+def detect_os_uuid():
+    """The Data volume of the one other Linux stub (m1n1 passes it as
+    /chosen/apfs-preboot-uuid, which apple_sep keys its xART session on)."""
+    current = Path('/proc/device-tree/chosen/apfs-preboot-uuid').read_bytes().rstrip(b'\0').decode().upper()
+    disks = json.loads(run(['lsblk', '-J', '-b', '-o', 'PATH,FSTYPE,SIZE']))
+    candidates = []
+
+    def walk(nodes):
+        for n in nodes:
+            if n.get('fstype') == 'apfs' and int(n.get('size') or 0) < 20 * 2**30:
+                for vu, name, role in apfs_volumes(n['path']):
+                    if role == 0x40 and vu != current:
+                        candidates.append((vu, name))
+            walk(n.get('children') or [])
+    walk(disks['blockdevices'])
+    require(len(candidates) == 1, 'cannot tell which install the SEP identity belongs to ('
+            + (', '.join(name for _, name in candidates) or 'no other Linux stub') + '); pass --os-uuid')
+    say(f'  SEP identity belongs to "{candidates[0][1]}"')
+    return candidates[0][0]
+
+
+# --- `import old-root`: the other Omarchy install on this disk, read-only ---
+
+class OldRoot:
+    base = Path('/run/omarchy-macos-vm/import-src')
+
+    def __enter__(self):
+        mine = run(['findmnt', '-no', 'SOURCE', '/']).split('[')[0].strip()
+        backing = set(run(['lsblk', '-nso', 'PATH', mine]).split())
+        disks = json.loads(run(['lsblk', '-J', '-o', 'PATH,FSTYPE,UUID']))
+        luks, ext4 = [], []
+
+        def walk(nodes):
+            for n in nodes:
+                if n.get('fstype') == 'crypto_LUKS' and n['path'] not in backing:
+                    luks.append(n)
+                if n.get('fstype') == 'ext4':
+                    ext4.append(n)
+                walk(n.get('children') or [])
+        walk(disks['blockdevices'])
+        self.mounts, self.mapper = [], None
+        self.key = self._mount(None, '/run/omarchy-macos-vm/import-key')
+        mounted = set(run(['findmnt', '-rno', 'SOURCE']).split())
+        for part in ext4:
+            if part['path'] in mounted:
+                continue
+            subprocess.run(['mount', '-o', 'ro,noload', part['path'], str(self.key)],
+                           stderr=subprocess.DEVNULL)
+            state = self.key / 'omarchy/encrypt.state'
+            if state.is_file():
+                fields = dict(l.split('=', 1) for l in state.read_text().split() if '=' in l)
+                match = [l for l in luks if l.get('uuid') == fields.get('luks_uuid')]
+                if match and (self.key / 'omarchy/luks-key').is_file():
+                    self.mounts.append(self.key)
+                    self.mapper = 'omarchy-macos-vm-import'
+                    run(['cryptsetup', 'open', '--readonly', '--key-file',
+                         str(self.key / 'omarchy/luks-key'), match[0]['path'], self.mapper])
+                    break
+            subprocess.run(['umount', str(self.key)], stderr=subprocess.DEVNULL)
+        require(self.mapper, 'no other Omarchy install with a key file on this disk; mount it and pass its root')
+        dev = '/dev/mapper/' + self.mapper
+        self.root = self._mount(dev, self.base, 'ro,subvol=@')
+        self.home = self._mount(dev, Path(str(self.base) + '-home'), 'ro,subvol=@home')
+        return self
+
+    def _mount(self, dev, path, opts=None):
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        if dev:
+            run(['mount', '-o', opts, dev, str(path)])
+            self.mounts.append(path)
+        return path
+
+    def __exit__(self, *exc):
+        for path in reversed(self.mounts):
+            subprocess.run(['umount', str(path)])
+        if self.mapper:
+            subprocess.run(['cryptsetup', 'close', self.mapper])
+
+
+# --- import -------------------------------------------------------------------
+
+def import_sep(src, uid, os_uuid):
+    say('SEP signer (enclave keybag and machine ref-key):')
+    present = [n for n in SEP_STATE if under(src, '/var/lib/' + n).is_file()]
+    require('aurora-sep-keybag.bin' in present and 'aurora-sep-refkey.bin' in present,
+            'the source install has no SEP identity (/var/lib/aurora-sep-keybag.bin, -refkey.bin)')
+    for n in present:
+        copy_file(under(src, '/var/lib/' + n), '/var/lib/' + n, mode=0o600)
+    conf = under(src, SEP_CONF).read_text()
+    key = re.search(r'^SEP_IDENTITY_PUBLIC_KEY=(\S+)$', conf, re.M)
+    require(key, 'the source sep-identity.conf names no public key')
+    copy_tree(under(src, Path(key.group(1)).parent), Path(key.group(1)).parent)
+    conf = re.sub(r'^SEP_IDENTITY_ALLOW_UID=.*$', f'SEP_IDENTITY_ALLOW_UID={uid}', conf, flags=re.M)
+    if not SEP_CONF.exists() or SEP_CONF.read_text() != conf:
+        write_private(SEP_CONF, conf.encode())
+    os.chmod(SEP_CONF.parent, 0o755)
+    # The source's own apple-sep build: the in-tree one lacks the attestation
+    # export the signer verifies its key with.
+    release = os.uname().release
+    theirs = under(src, f'/usr/lib/modules/{release}/kernel/drivers/soc/apple/apple-sep.ko')
+    ours = run(['modinfo', '-n', 'apple_sep']).strip()
+    params = lambda path: run(['modinfo', '-F', 'parm', str(path)])
+    if theirs.is_file() and 'refkey_attest_acl' in params(theirs):
+        require(run(['modinfo', '-F', 'vermagic', str(theirs)]).split()[0] == release,
+                'the source apple-sep module is for another kernel')
+        if not same(theirs, ours):
+            target = f'/usr/lib/modules/{release}/updates/apple-sep.ko'
+            if Path(target).exists() and not same(theirs, target):
+                raise Failure(f'{target} already holds another apple-sep build')
+            copy_file(theirs, target, mode=0o644)
+            run(['depmod', release])
+            reboot_reasons.append('load the imported apple-sep module')
+    else:
+        require('refkey_attest_acl' in params(ours),
+                'neither this kernel nor the source install has the SEP attestation-export module')
+    options = []
+    for path in sorted(glob.glob(str(under(src, '/etc/modprobe.d/*.conf')))):
+        for line in Path(path).read_text().splitlines():
+            parts = line.split()
+            if parts[:2] == ['options', 'apple_sep']:
+                options += [p for p in parts[2:] if not p.startswith(('os_uuid', 'xart_writes'))]
+    if os_uuid is None:
+        os_uuid = detect_os_uuid()
+    b = uuid.UUID(os_uuid).bytes
+    options += [f'os_uuid_hi={int.from_bytes(b[:8], "big")}', f'os_uuid_lo={int.from_bytes(b[8:], "big")}']
+    text = ('# omvm Apple services (omarchy-macos-vm apple-services import): the SEP identity\n'
+            '# another Linux install on this Mac made. os_uuid is that install\'s preboot\n'
+            '# (Data volume) UUID, which keys its xART session; the enclave must be able\n'
+            '# to write its anti-replay record when it loads the keybag.\n'
+            'options apple_sep ' + ' '.join(dict.fromkeys(options)) + '\n')
+    if not SEP_MODPROBE.exists() or SEP_MODPROBE.read_text() != text:
+        write_private(SEP_MODPROBE, text.encode(), mode=0o644)
+        reboot_reasons.append('attach the SEP with the imported identity')
+    if not (LIBEXEC / 'omvm-sep-identity-provider.py').exists():
+        copy_file(OMVM_SHARE / 'sep-identity-provider.py', LIBEXEC / 'omvm-sep-identity-provider.py', mode=0o755)
+    unit = Path('/etc/systemd/system/omvm-sep-identity.service')
+    if not unit.exists():
+        copy_file(OMVM_SHARE / 'omvm-sep-identity.service', unit, mode=0o644)
+    run(['systemctl', 'daemon-reload'])
+    run(['systemctl', 'enable', 'omvm-sep-identity.service'])
+
+
+def import_helpers(src, uid):
+    say('UID1 provider, FairPlay backend and Apple asset cache:')
+    cfg = json.loads(under(src, MANIFEST).read_text())
+    p = cfg['provider']
+    dirs = {str(Path(p[k]['path']).parent) for k in ('module', 'diagnostic', 'seeds')}
+    dirs.add(str(Path(cfg['backend']['path']).parent))
+    for d in sorted(dirs):
+        copy_tree(under(src, d), d)
+    copy_tree(under(src, cfg['cache']['path']), cfg['cache']['path'])
+    os.chmod('/var/lib/omvm', 0o700)
+    # m1n1 must carry the board's AES node; the reviewed config pins it.
+    config = under(src, p['update_m1n1']['path'])
+    require(sha256(config) == p['update_m1n1']['sha256'], 'the source m1n1 config is not the pinned one')
+    for d in sorted(set(re.findall(r'/var/lib/omvm/[A-Za-z0-9._-]+', config.read_text()))):
+        copy_tree(under(src, d), d)
+    target = Path(p['update_m1n1']['path'])
+    if not same(config, target):
+        if target.exists():
+            shutil.copy2(target, f'{target}.pre-apple-services-{STAMP}')
+        copy_file(config, f'{target}.apple-services', mode=0o644)
+        os.replace(f'{target}.apple-services', target)
+    boot = Path(p['boot']['path'])
+    if not boot.is_file() or sha256(boot) != p['boot']['sha256']:
+        with tempfile.TemporaryDirectory() as tmp:
+            built = Path(tmp) / 'boot.bin'
+            run(['update-m1n1', str(built)])
+            require(sha256(built) == p['boot']['sha256'],
+                    'update-m1n1 did not reproduce the reviewed boot image; restore '
+                    f'{target}.pre-apple-services-{STAMP} and check the kernel/m1n1 packages')
+            if boot.exists():
+                shutil.copy2(boot, f'{boot}.pre-apple-services-{STAMP}')
+            shutil.copy2(built, f'{boot}.new')
+            os.sync()
+            os.replace(f'{boot}.new', boot)
+            os.sync()
+        reboot_reasons.append('boot m1n1 with the AES device tree')
+    template = dict(cfg, vms={}, allow_uid=uid, max_active_vms=1)
+    write_private(TEMPLATE, (json.dumps(template, indent=2) + '\n').encode())
+
+
+def find_qemu(src, homes):
+    for home in homes:
+        for path in sorted(glob.glob(str(home / '*/.config/libvirt/qemu/*.xml'))):
+            try:
+                root = ET.parse(path).getroot()
+            except ET.ParseError:
+                continue
+            text = ET.tostring(root, encoding='unicode')
+            emulator = root.findtext('devices/emulator') or ''
+            if 'identity=on' in text and 'apple-fairplay-pci' in text and emulator:
+                candidate = Path(str(home) + emulator[len('/home'):]) if emulator.startswith('/home/') \
+                    else under(src, emulator)
+                if candidate.is_file():
+                    return candidate
+    return None
+
+
+def import_qemu(src, homes, qemu):
+    say('Identity-enabled QEMU:')
+    qemu = Path(qemu) if qemu else find_qemu(src, homes)
+    require(qemu and qemu.is_file(), 'no identity-enabled QEMU in the source install; pass --qemu')
+    copy_file(qemu, QEMU_DIR / 'qemu-system-aarch64', mode=0o755)
+    bundle = QEMU_DIR / 'qemu-bundle'
+    if not bundle.exists():
+        shutil.copytree(PKG_QEMU_BUNDLE, bundle, symlinks=False)
+    missing = [l for l in run(['ldd', str(QEMU_DIR / 'qemu-system-aarch64')]).splitlines() if 'not found' in l]
+    pkgs = sorted({pkg for lib, pkg in QEMU_LIBS.items() for l in missing if l.strip().startswith(lib)})
+    if pkgs:
+        run(['pacman', '-S', '--needed', '--noconfirm'] + pkgs)
+    help_text = run([str(QEMU_DIR / 'qemu-system-aarch64'), '-device', 'help'])
+    require('apple-fairplay-pci' in help_text, 'the imported QEMU has no FairPlay device')
+
+
+def import_identity(homes, user):
+    say('Host identity certificate (Apple-issued chain for the SEP key):')
+    for home in homes:
+        for path in sorted(glob.glob(str(home / '*/.config/omvm/apple-services/identity-provider.json'))
+                           + glob.glob(str(home / '*/vm-artifacts/vms/*/identity-provider.json'))
+                           + glob.glob(str(home / '*/.local/share/omvm/images/vms/*/identity-provider.json'))):
+            provider = json.loads(Path(path).read_text())
+            files = {k: Path(path).parent / provider[k] for k in ('certificate_chain', 'public_key', 'trust_root')}
+            if not all(f.is_file() for f in files.values()):
+                continue
+            dest = Path(user.pw_dir) / '.config/omvm/apple-services'
+            for d in (dest.parent.parent, dest.parent, dest, dest / 'identity-issued'):
+                if not d.exists():
+                    d.mkdir()
+                    os.chown(d, user.pw_uid, user.pw_gid)
+            for d in (dest, dest / 'identity-issued'):
+                os.chmod(d, 0o700)
+            out = {}
+            for k, f in files.items():
+                copy_file(f, dest / 'identity-issued' / f.name, mode=0o600, owner=(user.pw_uid, user.pw_gid))
+                out[k] = 'identity-issued/' + f.name
+            out['socket'] = '/run/omvm-identity/sep.sock'
+            write_private(dest / 'identity-provider.json', (json.dumps(out) + '\n').encode(),
+                          owner=(user.pw_uid, user.pw_gid))
+            return
+    raise Failure('no identity-provider.json with its certificate files in the source home')
+
+
+def cmd_import(a):
+    user = pwd.getpwnam(a.user or os.environ.get('SUDO_USER') or 'root')
+    require(user.pw_uid > 0, 'pass --user (the VM owner)')
+
+    def go(src, homes):
+        src = Path(src).resolve()
+        require(src != Path('/') and (src / 'etc').is_dir(), 'SRC must be the root of another install')
+        say(f'Importing Apple services from {src}')
+        import_helpers(src, user.pw_uid)
+        import_sep(src, user.pw_uid, a.os_uuid)
+        import_qemu(src, homes, a.qemu)
+        import_identity(homes, user)
+        say('Imported. Per VM: omarchy-macos-vm apple-services enable')
+        if reboot_reasons:
+            say('Restart Omarchy (linux-aurora-vmapple) to ' + ', '.join(dict.fromkeys(reboot_reasons)) + '.')
+
+    if a.src == 'old-root':
+        with OldRoot() as old:
+            go(old.root, [old.home] + ([Path(a.home)] if a.home else []))
+    else:
+        homes = [Path(a.home)] if a.home else [Path(str(Path(a.src).resolve()) + '/home')]
+        go(a.src, homes)
+
+
+# --- enable / status ---------------------------------------------------------
+
+def cmd_enable(a):
+    require(re.fullmatch(r'[A-Za-z0-9_-]{1,32}', a.vm), 'invalid VM name')
+    require(TEMPLATE.is_file(), 'import the Apple services first: omarchy-macos-vm apple-services import')
+    identifier = uuid.UUID(a.uuid).bytes
+    cfg = json.loads(TEMPLATE.read_text())
+    if MANIFEST.is_file():
+        cfg['vms'] = json.loads(MANIFEST.read_text()).get('vms', {})
+    path = IDENTIFIERS / f'{a.vm}.identifier'
+    IDENTIFIERS.mkdir(parents=True, exist_ok=True)
+    os.chmod(IDENTIFIERS, 0o700)
+    os.chmod(IDENTIFIERS.parent, 0o700)
+    if a.vm in cfg['vms']:
+        old = Path(cfg['vms'][a.vm]['identifier']['path'])
+        require(old.read_bytes() == identifier, f'{a.vm} is enrolled with another identifier; left as it is')
+        path = old
+    elif not path.exists():
+        write_private(path, identifier)
+    require(path.read_bytes() == identifier, f'{path} holds another identifier')
+    cfg['vms'][a.vm] = {'identifier': {'path': str(path), 'sha256': hashlib.sha256(identifier).hexdigest()}}
+    STAGE.mkdir(parents=True, exist_ok=True)
+    os.chmod(STAGE, 0o700)
+    staged = STAGE / 'apple-helpers.json'
+    write_private(staged, (json.dumps(cfg, indent=2) + '\n').encode())
+    run([sys.executable, str(OMVM_SHARE / 'install-apple-helpers.py'), str(staged)])
+    if not Path(f'/var/lib/omvm/apple-helpers/vms/{a.vm}/state.bin').exists():
+        run([str(HELPERS), 'enroll', a.vm])
+        say(f'{a.vm}: enrolled with its own identifier and an empty FairPlay checkpoint')
+    else:
+        say(f'{a.vm}: already enrolled; its checkpoint is kept')
+
+
+def cmd_status(_a):
+    ok = lambda b: 'yes' if b else 'no'
+    say(f'imported prerequisites: {ok(TEMPLATE.is_file())}')
+    say(f'SEP identity:           {ok(all(Path("/var/lib/" + n).is_file() for n in SEP_STATE[:2]))}')
+    say(f'SEP signer running:     {ok(Path("/run/omvm-identity/sep.sock").exists())}')
+    say(f'identity QEMU:          {ok((QEMU_DIR / "qemu-system-aarch64").is_file())}')
+    if TEMPLATE.is_file():
+        boot = json.loads(TEMPLATE.read_text())['provider']['boot']
+        say(f'AES boot image staged:  {ok(Path(boot["path"]).is_file() and sha256(boot["path"]) == boot["sha256"])}')
+    say(f'UID1 provider READY:    {ok(Path("/dev/omvm-uid1-provider").exists())}')
+    if MANIFEST.is_file():
+        say('enrolled VMs:           ' + ' '.join(sorted(json.loads(MANIFEST.read_text())['vms'])))
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest='cmd', required=True)
+    i = sub.add_parser('import')
+    i.add_argument('src')
+    i.add_argument('--home')
+    i.add_argument('--user')
+    i.add_argument('--os-uuid')
+    i.add_argument('--qemu')
+    e = sub.add_parser('enable')
+    e.add_argument('vm')
+    e.add_argument('--uuid', required=True)
+    sub.add_parser('status')
+    a = p.parse_args()
+    require(os.geteuid() == 0, 'run as root (omarchy-macos-vm apple-services does)')
+    {'import': cmd_import, 'enable': cmd_enable, 'status': cmd_status}[a.cmd](a)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (Failure, OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
+        print('omarchy-macos-vm apple-services: ' + str(exc), file=sys.stderr)
+        sys.exit(1)
