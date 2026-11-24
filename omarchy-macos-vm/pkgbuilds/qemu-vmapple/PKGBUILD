@@ -8,8 +8,8 @@
 # it never conflicts with Arch's qemu. GPL-2.0-or-later; ships no Apple files.
 
 pkgname=qemu-vmapple
-pkgver=10.1.50.r1b41f5f5
-pkgrel=4
+pkgver=11.1.50.r1b41f5f5
+pkgrel=1
 pkgdesc="QEMU vmapple machine on KVM with the reims-vgpu GPU, for omvm's macOS guests"
 arch=('aarch64')
 url="https://github.com/sapoepsilon/omvm"
@@ -18,7 +18,10 @@ depends=(glib2 pixman gtk3 vulkan-icd-loader libslirp dtc zlib libepoxy wayland 
          gnutls nettle libpipewire sdl3)
 # libxss: reims-vgpu's static SDL3 configure fails without its header and soname. SDL only
 # dlopens libXss.so.1 for screensaver suspend, which reims never asks for, so no depends entry.
-makedepends=(git rustup ninja meson cmake python python-distlib vulkan-headers clang lld pkgconf libxss)
+# python-setuptools, python-wheel: configure's offline mkvenv takes them from the system
+# (pythondeps.toml tooling) to install qemu's python/ package; pip comes from ensurepip.
+makedepends=(git rustup ninja meson cmake python python-distlib python-setuptools python-wheel
+             vulkan-headers clang lld pkgconf libxss)
 options=('!strip' '!lto')
 _qemu_commit=1b41f5f5db4d1067d023973b9bd74c7b341e0d28
 _reims_commit=1fe0acb68b287db36f1e6c7b9f45383940b8a76f
