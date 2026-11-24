@@ -39,7 +39,7 @@ fi
 
 device=$(lsblk -rno PATH,LABEL | awk '$2=="VMXFER"{print $1; exit}')
 if [[ -z $device ]]; then
-  rm -f "$stamp"
+  rm -f "$stamp" "$state_dir/vmxfer-error"
   say "no VMXFER partition"
   exit 0
 fi
@@ -52,8 +52,10 @@ else
   if [[ -z $dir ]]; then
     # Read-only; files readable by every user (omvm ingest runs as the owner).
     mkdir -p "$mnt" && mount -t exfat -o ro,nosuid,nodev,noexec,fmask=0133,dmask=0022 "$device" "$mnt" || {
-      say "cannot mount $device read-only"
-      exit 0
+      rm -f "$stamp"
+      mkdir -p "$state_dir" 2>/dev/null && printf 'cannot mount %s read-only\n' "$device" >"$state_dir/vmxfer-error" || true
+      say "cannot mount $device read-only" >&2
+      exit 1
     }
     dir=$mnt
     mounted_here=1
@@ -61,16 +63,22 @@ else
 fi
 
 if [[ -f $dir/vmxfer.sha256 ]] && compgen -G "$dir/*-restore.tar.gz" >/dev/null; then
-  mkdir -p "$state_dir" &&
-    printf 'device=%s\nmount=%s\nfound=%s\n' "$device" "$dir" "$(date -u +%FT%TZ)" >"$stamp.new" &&
-    mv -f "$stamp.new" "$stamp"
+  if ! mkdir -p "$state_dir" ||
+    ! printf 'device=%s\nmount=%s\nfound=%s\n' "$device" "$dir" "$(date -u +%FT%TZ)" >"$stamp.new" ||
+    ! mv -f "$stamp.new" "$stamp"; then
+    rm -f "$stamp.new" "$stamp"
+    say "cannot write $stamp" >&2
+    ((mounted_here)) && umount "$mnt" || true
+    exit 1
+  fi
+  rm -f "$state_dir/vmxfer-error"
   say "the restored macOS VM is on $device ($dir): it is finished at the next login"
   # Whoever is logged in starts the import now (omarchy-macos-vm-create.service).
   [[ -x $users_helper ]] && "$users_helper" kick
   exit 0
 fi
 
-rm -f "$stamp"
+rm -f "$stamp" "$state_dir/vmxfer-error"
 say "$device has no restored VM yet"
 ((mounted_here)) && umount "$mnt"
 exit 0

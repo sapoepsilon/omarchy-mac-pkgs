@@ -453,26 +453,49 @@ def cmd_enable(a):
     os.chmod(STAGE, 0o700)
     staged = STAGE / 'apple-helpers.json'
     write_private(staged, (json.dumps(cfg, indent=2) + '\n').encode())
-    run([sys.executable, str(OMVM_SHARE / 'install-apple-helpers.py'), str(staged)])
-    if not Path(f'/var/lib/omvm/apple-helpers/vms/{a.vm}/state.bin').exists():
+    installer = OMVM_SHARE / 'install-apple-helpers.py'
+    require(installer.is_file(), f'missing Apple helpers installer: {installer}')
+    run([sys.executable, str(installer), str(staged)])
+    require(MANIFEST.is_file(), f'Apple helpers manifest was not installed: {MANIFEST}')
+    installed_vms = json.loads(MANIFEST.read_text()).get('vms', {})
+    require(a.vm in installed_vms, f'{a.vm} was not registered in {MANIFEST}')
+    state_bin = Path(f'/var/lib/omvm/apple-helpers/vms/{a.vm}/state.bin')
+    if not state_bin.exists():
+        require(HELPERS.is_file() and os.access(HELPERS, os.X_OK),
+                f'missing executable Apple helpers binary: {HELPERS}')
         run([str(HELPERS), 'enroll', a.vm])
+        require(state_bin.is_file() and state_bin.stat().st_size > 0,
+                f'{a.vm}: enrollment did not create a valid FairPlay checkpoint ({state_bin})')
         say(f'{a.vm}: enrolled with its own identifier and an empty FairPlay checkpoint')
     else:
+        require(state_bin.stat().st_size > 0,
+                f'{a.vm}: existing FairPlay checkpoint is empty ({state_bin})')
         say(f'{a.vm}: already enrolled; its checkpoint is kept')
 
 
 def cmd_status(_a):
     ok = lambda b: 'yes' if b else 'no'
-    say(f'imported prerequisites: {ok(TEMPLATE.is_file())}')
-    say(f'SEP identity:           {ok(all(Path("/var/lib/" + n).is_file() for n in SEP_STATE[:2]))}')
-    say(f'SEP signer running:     {ok(Path("/run/omvm-identity/sep.sock").exists())}')
-    say(f'identity QEMU:          {ok((QEMU_DIR / "qemu-system-aarch64").is_file())}')
-    if TEMPLATE.is_file():
+    has_template = TEMPLATE.is_file()
+    has_sep = all(Path('/var/lib/' + n).is_file() for n in SEP_STATE[:2])
+    sep_running = Path('/run/omvm-identity/sep.sock').exists()
+    has_qemu = (QEMU_DIR / 'qemu-system-aarch64').is_file()
+    has_uid1 = Path('/dev/omvm-uid1-provider').exists()
+    boot_ok = False
+    say(f'imported prerequisites: {ok(has_template)}')
+    say(f'SEP identity:           {ok(has_sep)}')
+    say(f'SEP signer running:     {ok(sep_running)}')
+    say(f'identity QEMU:          {ok(has_qemu)}')
+    if has_template:
         boot = json.loads(TEMPLATE.read_text())['provider']['boot']
-        say(f'AES boot image staged:  {ok(Path(boot["path"]).is_file() and sha256(boot["path"]) == boot["sha256"])}')
-    say(f'UID1 provider READY:    {ok(Path("/dev/omvm-uid1-provider").exists())}')
+        boot_ok = Path(boot['path']).is_file() and sha256(boot['path']) == boot['sha256']
+        say(f'AES boot image staged:  {ok(boot_ok)}')
+    say(f'UID1 provider READY:    {ok(has_uid1)}')
+    enrolled = []
     if MANIFEST.is_file():
-        say('enrolled VMs:           ' + ' '.join(sorted(json.loads(MANIFEST.read_text())['vms'])))
+        enrolled = sorted(json.loads(MANIFEST.read_text()).get('vms', {}))
+        say('enrolled VMs:           ' + ' '.join(enrolled))
+    ready = has_template and has_sep and sep_running and has_qemu and boot_ok and has_uid1 and bool(enrolled)
+    say(f'apple-services ready:   {ok(ready)}')
 
 
 def main():

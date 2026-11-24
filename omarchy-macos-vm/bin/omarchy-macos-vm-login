@@ -14,14 +14,50 @@
 set -uo pipefail
 
 state_dir=${OMARCHY_MACOS_VM_STATE:-/var/lib/omarchy/macos-vm}
+marker=${OMARCHY_MACOS_VM_MARKER:-/etc/omarchy/macos-vm.enabled}
+user_state=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-macos-vm
+config_file=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/macos-vm.conf
 images=${OMVM_IMAGES:-${XDG_DATA_HOME:-$HOME/.local/share}/omvm/images}
-created=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-macos-vm/vm-created
+created=$user_state/vm-created
+progress_file=$user_state/progress
+stages_file=$user_state/stages
 side_kernel=linux-aurora-vmapple
 side_kernel_param=${OMARCHY_MACOS_VM_KVM_PARAM:-/sys/module/kvm/parameters/emulate_nisv_ldst}
 default_side_kernel=${OMARCHY_MAC_DEFAULT_SIDE_KERNEL:-/etc/omarchy-mac-boot/default-side-kernel}
 vm_name=${OMVM_VM:-macos}
 unit=omarchy-macos-vm-creating
 progress_cmd="omarchy-launch-floating-terminal-with-presentation 'omarchy-macos-vm progress'"
+apple_provider=${XDG_CONFIG_HOME:-$HOME/.config}/omvm/apple-services/identity-provider.json
+apple_qemu=${OMVM_APPLE_QEMU:-/usr/lib/omvm-apple-services/qemu-system-aarch64}
+apple_sep_conf=${OMARCHY_MACOS_VM_APPLE_SEP_CONF:-/etc/omvm/sep-identity.conf}
+apple_template=${OMARCHY_MACOS_VM_APPLE_TEMPLATE:-/etc/omvm/apple-helpers.template.json}
+
+progress_value() { sed -n "s/^$1=//p" "$progress_file" 2>/dev/null | tail -1; }
+apple_services_requested() {
+  [[ ${OMARCHY_MACOS_VM_APPLE_SERVICES:-0} == 1 ]] && return 0
+  [[ $(sed -n 's/^APPLE_SERVICES=//p' "$config_file" 2>/dev/null | tail -1) == 1 ]] && return 0
+  if [[ -f $marker ]]; then
+    python3 -I -c 'import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    ok = bool(d.get("apple_services")) or d.get("tier") == "apple-services"
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)' "$marker" 2>/dev/null && return 0
+  fi
+  [[ -e $apple_sep_conf || -e $apple_template || -e $apple_provider || -e $apple_qemu ]]
+}
+setup_incomplete_or_failed() {
+  local pstage
+  pstage=$(progress_value stage)
+  [[ $pstage == failed ]] && return 0
+  [[ -f $progress_file && $pstage != ready ]] && return 0
+  [[ -f $stages_file ]] && grep -Eq '=(failed|skipped|pending)$' "$stages_file" && return 0
+  if apple_services_requested && [[ ! -e $images/vms/$vm_name/apple_services ]]; then
+    return 0
+  fi
+  return 1
+}
 
 # The notification daemon (Omarchy's shell) can come up after this unit: wait
 # for it (OMARCHY_MACOS_VM_NOTIFY_WAIT seconds), and log what was sent.
@@ -39,7 +75,14 @@ notify() {
 }
 
 if omvm mode "$vm_name" >/dev/null 2>&1; then
-  mkdir -p "${created%/*}" && date -u +%FT%TZ >"$created"
+  if setup_incomplete_or_failed; then
+    detail=$(progress_value detail)
+    notify -u critical "macOS VM setup incomplete" \
+      "${detail:-A setup step did not complete; run omarchy-macos-vm create to inspect and retry.}" \
+      --exec "$progress_cmd"
+    exit 1
+  fi
+  mkdir -p "${created%/*}" && date -u +%FT%TZ >"$created" || exit 1
   exit 0
 fi
 

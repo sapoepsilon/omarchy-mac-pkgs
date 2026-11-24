@@ -50,6 +50,10 @@ run_cmd() {
     XDG_RUNTIME_DIR="$test_tmp/run" OMVM_IMAGES="$images" OMARCHY_MACOS_VM_STATE="$state" \
     OMARCHY_MACOS_VM_MARKER="$marker" OMARCHY_MAC_DEFAULT_SIDE_KERNEL="$default_side" \
     OMARCHY_MACOS_VM_BOOT_DEFAULT="${TEST_BOOT_DEFAULT:-$stub_bin/boot-default}" \
+    OMARCHY_MACOS_VM_APPLE_SEP_CONF="$test_tmp/no-sep-conf" \
+    OMARCHY_MACOS_VM_APPLE_TEMPLATE="$test_tmp/no-apple-template" \
+    OMVM_APPLE_QEMU="$test_tmp/no-apple-qemu" \
+    OMARCHY_MACOS_VM_APPLE_HELPER="$test_tmp/no-apple-helper" \
     OMARCHY_MACOS_VM_KVM_PARAM="$kvm_param" OMARCHY_MACOS_VM_REQUIRED_GB=0 OMARCHY_MACOS_VM_NOTIFY_WAIT=0 \
     OMARCHY_MACOS_VM_NO_LAUNCH=1 OMARCHY_MACOS_VM_PROGRESS_POLL=0 \
     bash "$command" "$@" >"$test_tmp/out" 2>&1

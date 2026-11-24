@@ -10,24 +10,48 @@ state=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-macos-vm
 desktop_file=${XDG_DATA_HOME:-$HOME/.local/share}/applications/macos-vm.desktop
 
 # The same entry omarchy-macos-vm install writes; omvm show where the runtime lacks it.
-write_desktop_entry() {
-  local exec="omvm show"
-  [[ -e $desktop_file ]] && return 0
-  command -v omarchy-macos-vm >/dev/null && exec="uwsm app -- omarchy-macos-vm launch"
-  mkdir -p "${desktop_file%/*}" &&
-    printf '%s\n' "[Desktop Entry]" "Name=macOS" \
-      "Comment=Start the macOS VM (omvm) and bring its window to the front" \
-      "Exec=$exec" "Icon=macos" "Terminal=false" "Type=Application" \
-      "Categories=System;Virtualization;" "Keywords=omvm;macOS;VM;" >"$desktop_file"
+verify_desktop_entry() {
+  [[ -f $desktop_file && -s $desktop_file ]] &&
+    grep -Fqx '[Desktop Entry]' "$desktop_file" &&
+    grep -Eq '^Name=' "$desktop_file" &&
+    grep -Eq '^Exec=' "$desktop_file"
 }
 
-mkdir -p "$state"
-write_desktop_entry || echo "omarchy-macos-vm-user-setup: could not write $desktop_file" >&2
-if omvm prepare; then
-  omvm doctor || echo "omarchy-macos-vm-user-setup: omvm doctor lists what is still to do" >&2
-  date -u +%FT%TZ >"$state/done"
-  echo "omarchy-macos-vm-user-setup: omvm is ready; next steps: /var/lib/omarchy/macos-vm/next-steps.txt"
-else
-  echo "omarchy-macos-vm-user-setup: omvm prepare failed; it runs again at the next login" >&2
+write_desktop_entry() {
+  local exec="omvm show" tmp
+  verify_desktop_entry && return 0
+  [[ ! -d $desktop_file ]] || return 1
+  command -v omarchy-macos-vm >/dev/null && exec="uwsm app -- omarchy-macos-vm launch"
+  mkdir -p "${desktop_file%/*}" || return 1
+  tmp=$(mktemp "${desktop_file%/*}/.macos-vm.desktop.XXXXXX") || return 1
+  if ! printf '%s\n' "[Desktop Entry]" "Name=macOS" \
+    "Comment=Start the macOS VM (omvm) and bring its window to the front" \
+    "Exec=$exec" "Icon=macos" "Terminal=false" "Type=Application" \
+    "Categories=System;Virtualization;" "Keywords=omvm;macOS;VM;" >"$tmp" ||
+    ! mv -fT "$tmp" "$desktop_file"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  verify_desktop_entry
+}
+
+fail_user_setup() {
+  rm -f "$state/done"
+  mkdir -p "$state" 2>/dev/null && printf '%s\n' "$1" >"$state/user-setup-error" || true
+  echo "omarchy-macos-vm-user-setup: $1" >&2
   exit 1
+}
+
+mkdir -p "$state" || fail_user_setup "could not create state directory $state"
+write_desktop_entry || fail_user_setup "could not create or verify launcher $desktop_file; retry at next login"
+if ! omvm prepare; then
+  fail_user_setup "omvm prepare failed; it runs again at the next login"
 fi
+omvm doctor || echo "omarchy-macos-vm-user-setup: omvm doctor lists what is still to do" >&2
+tmp_done=$(mktemp "$state/.done.XXXXXX") || fail_user_setup "could not create temporary done marker in $state"
+if ! date -u +%FT%TZ >"$tmp_done" || ! mv -f "$tmp_done" "$state/done"; then
+  rm -f "$tmp_done"
+  fail_user_setup "could not write $state/done"
+fi
+rm -f "$state/user-setup-error"
+echo "omarchy-macos-vm-user-setup: omvm is ready; next steps: /var/lib/omarchy/macos-vm/next-steps.txt"

@@ -28,7 +28,10 @@ case $1 in
   -Q) for p in "${@:2}"; do grep -Fxq "$p" "$TEST_INSTALLED" || exit 1; echo "$p 1-1"; done ;;
   -U) [[ -z ${TEST_PACMAN_FAIL:-} ]] || exit 1
       for f in "${@:4}"; do b=${f##*/}; echo "${b%-*-*-*}" >>"$TEST_INSTALLED"; done ;;
-  -S) [[ -z ${TEST_PACMAN_FAIL:-} ]] || exit 1 ;;
+  -S) [[ -z ${TEST_PACMAN_FAIL:-} ]] || exit 1
+      if [[ -z ${TEST_PACMAN_SKIP:-} ]]; then
+        for p in "${@:4}"; do echo "$p" >>"$TEST_INSTALLED"; done
+      fi ;;
 esac'
 stub systemctl 'echo "systemctl $*" >>"$TEST_CALLS"; [[ $* != *is-active* || -n ${TEST_ACTIVE:-} ]]'
 stub systemd-run 'echo "systemd-run $*" >>"$TEST_CALLS"'
@@ -254,8 +257,12 @@ run_login() {
   : >"$calls"
   set +e
   env -u XDG_STATE_HOME -u XDG_DATA_HOME HOME="$user_home" TEST_CALLS="$calls" PATH="$stub_bin:$PATH" \
-    OMARCHY_MACOS_VM_STATE="$lstate" OMVM_IMAGES="$limages" OMARCHY_MACOS_VM_KVM_PARAM="$kvm" \
     OMARCHY_MAC_DEFAULT_SIDE_KERNEL="$ldefault" \
+    OMARCHY_MACOS_VM_STATE="$lstate" OMARCHY_MACOS_VM_MARKER="$test_tmp/no-marker" \
+    OMARCHY_MACOS_VM_APPLE_SEP_CONF="$test_tmp/no-sep-conf" \
+    OMARCHY_MACOS_VM_APPLE_TEMPLATE="$test_tmp/no-apple-template" \
+    OMVM_APPLE_QEMU="$test_tmp/no-apple-qemu" \
+    OMVM_IMAGES="$limages" OMARCHY_MACOS_VM_KVM_PARAM="$kvm" \
     OMARCHY_MACOS_VM_NOTIFY_WAIT=0 bash "$login" >"$test_tmp/out" 2>&1
   status=$?
   set -e

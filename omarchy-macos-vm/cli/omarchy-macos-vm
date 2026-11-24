@@ -40,7 +40,7 @@ omvm_data=${OMVM_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/omvm}
 omvm_images=${OMVM_IMAGES:-$omvm_data/images}
 stack=(omvm qemu-vmapple mesa-honeykrisp-vmapple linux-aurora-vmapple)
 side_kernel=linux-aurora-vmapple
-desktop_file=$HOME/.local/share/applications/macos-vm.desktop
+desktop_file=${XDG_DATA_HOME:-$HOME/.local/share}/applications/macos-vm.desktop
 vm_name=${OMVM_VM:-macos}
 # The side kernel exposes this KVM parameter; omvm setup needs it booted.
 side_kernel_param=${OMARCHY_MACOS_VM_KVM_PARAM:-/sys/module/kvm/parameters/emulate_nisv_ldst}
@@ -52,6 +52,7 @@ REQUIRED_SPACE_GB=${OMARCHY_MACOS_VM_REQUIRED_GB:-80}
 VIRSH=(virsh -q -c qemu:///session)
 # What create is doing (stage, percent, detail) and its output, for the progress view.
 progress_file=$user_state/progress
+stages_file=$user_state/stages
 create_log=$user_state/create.log
 creating_unit=omarchy-macos-vm-creating
 progress_pid=${XDG_RUNTIME_DIR:-/tmp}/omarchy-macos-vm-progress.pid
@@ -61,21 +62,27 @@ progress_pid=${XDG_RUNTIME_DIR:-/tmp}/omarchy-macos-vm-progress.pid
 apple_helper=${OMARCHY_MACOS_VM_APPLE_HELPER:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-apple-services}
 apple_provider=${XDG_CONFIG_HOME:-$HOME/.config}/omvm/apple-services/identity-provider.json
 apple_qemu=${OMVM_APPLE_QEMU:-/usr/lib/omvm-apple-services/qemu-system-aarch64}
+apple_sep_conf=${OMARCHY_MACOS_VM_APPLE_SEP_CONF:-/etc/omvm/sep-identity.conf}
+apple_template=${OMARCHY_MACOS_VM_APPLE_TEMPLATE:-/etc/omvm/apple-helpers.template.json}
+request_apple_services=0
 
 show_usage() {
   cat <<'USAGE'
 Usage: omarchy-macos-vm [command] [options]
 
 Commands:
-  install              Install the macOS VM stack and configure the VM
+  install [--apple-services]
+                       Install the macOS VM stack and configure the VM
   remove [--purge]     Remove the macOS VM and the stack (--purge also deletes guest images)
   launch [options]     Start macOS VM (if needed) and open its window
                        Options:
                          --keep-alive, -k   Keep VM running after its window closes
   stop                 Stop the running macOS VM
   status               Show current VM status
-  create [--auto]      Finish the VM after the macOS step (ingest, setup, virt);
-                       --auto picks the account, RAM and cores without asking
+  create [--auto] [--apple-services]
+                       Finish the VM after the macOS step (ingest, setup, virt);
+                       --auto picks the account, RAM and cores without asking;
+                       --apple-services requires Apple Account / iMessage enrollment
   progress             Follow the setup (stage, percent, log) until it is done
   apple-services import SRC|old-root [--os-uuid UUID] [--qemu PATH]
                        Bring the SEP identity and Apple helpers (Apple Account,
@@ -130,9 +137,13 @@ setting() {
 }
 
 save_settings() {
+  local apple_flag=${3:-$(setting APPLE_SERVICES 0)}
   mkdir -p "${config_file%/*}" &&
-    printf '# omarchy-macos-vm install: what omvm virt %s is defined with\nRAM_GIB=%s\nCPUS=%s\n' \
-      "$vm_name" "$1" "$2" >"$config_file"
+    {
+      printf '# omarchy-macos-vm install: what omvm virt %s is defined with\nRAM_GIB=%s\nCPUS=%s\n' \
+        "$vm_name" "$1" "$2"
+      [[ $apple_flag == 1 ]] && printf 'APPLE_SERVICES=1\n' || true
+    } >"$config_file"
 }
 
 # omvm reads OMVM_GUEST_USER from its gui.env; set it, keeping every other line.
@@ -205,23 +216,50 @@ on_side_kernel() { [[ -e $side_kernel_param ]]; }
 vmxfer_mount() { sed -n 's/^mount=//p' "$state_dir/vmxfer-ready" 2>/dev/null | tail -1; }
 side_kernel_default() { [[ -f $default_side_kernel ]] && grep -Fxq "$side_kernel" "$default_side_kernel" 2>/dev/null; }
 
-# --- progress ----------------------------------------------------------------
+# --- progress & readiness ----------------------------------------------------
 
-# STAGE PERCENT DETAIL: what create is doing now.
+# STAGE PERCENT DETAIL [FAILED_STAGE]: what create is doing now.
 set_progress() {
+  local stage=$1 percent=$2 detail=$3 failed_stage=${4:-} tier
+  tier=$(active_tier)
   mkdir -p "$user_state" &&
-    printf 'stage=%s\npercent=%s\ndetail=%s\nupdated=%s\n' "$1" "$2" "$3" "$(date -u +%FT%TZ)" >"$progress_file.new" &&
-    mv -f "$progress_file.new" "$progress_file"
+    {
+      printf 'stage=%s\npercent=%s\ndetail=%s\ntier=%s\n' "$stage" "$percent" "$detail" "$tier"
+      [[ -n $failed_stage ]] && printf 'failed_stage=%s\n' "$failed_stage"
+      printf 'updated=%s\n' "$(date -u +%FT%TZ)"
+    } >"$progress_file.new" &&
+    mv -f "$progress_file.new" "$progress_file" || {
+    rm -f "$progress_file.new"
+    return 1
+  }
 }
 progress_value() { sed -n "s/^$1=//p" "$progress_file" 2>/dev/null | tail -1; }
+
+# Explicit per-stage outcome tracking (ok, failed, skipped, waiting, restart-needed, not-requested).
+set_stage_outcome() {
+  local stage=$1 outcome=$2 tmp
+  mkdir -p "$user_state" || return 1
+  tmp=$(mktemp "$user_state/.stages.XXXXXX") || return 1
+  {
+    [[ -f $stages_file ]] && grep -v "^$stage=" "$stages_file" || true
+    printf '%s=%s\n' "$stage" "$outcome"
+  } >"$tmp" && mv -f "$tmp" "$stages_file" || {
+    rm -f "$tmp"
+    return 1
+  }
+}
+stage_outcome() { sed -n "s/^$1=//p" "$stages_file" 2>/dev/null | tail -1; }
+reset_stages() { mkdir -p "$user_state" && : >"$stages_file"; }
+
 # The system setup's stage (omarchy-macos-vm-setup writes it): waiting-for-internet, installing, ...
 system_stage() { sed -n 's/^stage=//p' "$state_dir/status" 2>/dev/null | tail -1; }
+system_failed_stage() { sed -n 's/^failed_stage=//p' "$state_dir/status" 2>/dev/null | tail -1; }
 creating() { systemctl --user is-active --quiet "$creating_unit.service" 2>/dev/null; }
 
 stage_name() {
   case $1 in
   waiting-for-internet) echo "Waiting for internet" ;;
-  installing | retrying) echo "Installing the macOS VM stack" ;;
+  installing | retrying | checking-boot | host-setup | staging-macos-step) echo "Installing the macOS VM stack" ;;
   importing) echo "Importing" ;;
   restart-needed) echo "Restart needed" ;;
   setting-up) echo "Setting up" ;;
@@ -237,7 +275,7 @@ in_progress() {
   if [[ ! -e $state_dir/done ]]; then
     stage=$(system_stage)
     case $stage in
-    waiting-for-internet | installing | retrying) echo "$stage" ;;
+    waiting-for-internet | installing | retrying | checking-boot | host-setup | staging-macos-step) echo "$stage" ;;
     esac
     return 0
   fi
@@ -294,28 +332,43 @@ progress_bar() {
 
 # The view: every stage with where it is, the current step and the last lines of output.
 show_progress() {
-  local stage percent detail mark name current_index=0 i
+  local stage percent detail failed_stage tier problems mark name current_index=0 i
   local -a stages=(importing restart-needed setting-up ready)
   echo $$ >"$progress_pid" 2>/dev/null
   trap 'rm -f "$progress_pid"' EXIT
   while true; do
+    failed_stage=""
+    tier=$(active_tier)
     if [[ ! -e $state_dir/done ]]; then
       stage=$(system_stage)
+      failed_stage=$(system_failed_stage)
       percent=0
       case $stage in
       waiting-for-internet) detail="Connect to Wi-Fi: the setup starts as soon as this Mac is online." ;;
-      failed) detail=$(cat "$state_dir/last-error" 2>/dev/null) ;;
+      retrying) detail=$(cat "$state_dir/last-error" 2>/dev/null || echo "Retrying stack installation") ;;
+      failed) detail=$(cat "$state_dir/last-error" 2>/dev/null || echo "The macOS VM stack setup failed") ;;
       *) stage=installing detail="Installing the macOS VM packages (a few minutes)" ;;
       esac
     else
       stage=$(progress_value stage)
       percent=$(progress_value percent)
       detail=$(progress_value detail)
-      if vm_exists; then
+      failed_stage=$(progress_value failed_stage)
+      [[ -n $(progress_value tier) ]] && tier=$(progress_value tier)
+      if [[ $stage == failed ]] && ! creating; then
+        # Fail-closed: never report ready when a setup stage failed, even if vm_exists is true.
+        :
+      elif [[ $stage == ready ]]; then
+        problems=$(readiness_problems)
+        if [[ -n $problems ]]; then
+          stage=failed
+          detail="VM is not ready: $problems"
+        fi
+      elif [[ -z $stage ]] && ! creating && vm_ready; then
         stage=ready percent=100 detail="The macOS VM is ready"
       elif [[ -z $stage ]] || { creating && [[ $stage == restart-needed || $stage == failed ]]; }; then
         # A new run has started and not written its first step yet.
-        stage=importing percent=0 detail="Starting"
+        stage=importing percent=0 detail="Starting" failed_stage=""
       fi
     fi
     printf '\033[H\033[2J'
@@ -323,7 +376,11 @@ show_progress() {
     current_index=-1
     for i in "${!stages[@]}"; do [[ ${stages[i]} == "$stage" ]] && current_index=$i; done
     if ((current_index < 0)) && [[ -n $stage ]]; then
-      printf '  > %s\n' "$(stage_name "${stage:-waiting}")"
+      if [[ $stage == failed && -n $failed_stage ]]; then
+        printf '  > Failed (%s)\n' "$failed_stage"
+      else
+        printf '  > %s\n' "$(stage_name "${stage:-waiting}")"
+      fi
     fi
     for i in "${!stages[@]}"; do
       name=$(stage_name "${stages[i]}")
@@ -347,6 +404,9 @@ show_progress() {
     case $stage in
     ready)
       printf '\n  macOS VM ready: open it from Super + Space (macOS).\n'
+      if [[ $tier == apple-services ]] || apple_services_enabled; then
+        printf '  Apple services: enabled\n'
+      fi
       if [[ -n $(shown_username) ]]; then
         printf '\n'
         credential_lines | sed 's/^/  /'
@@ -360,7 +420,11 @@ show_progress() {
       ;;
     failed)
       if [[ -e $state_dir/done ]]; then
-        printf '\n  The setup stopped. Retry: omarchy-macos-vm create\n'
+        if [[ $failed_stage == apple_services || $failed_stage == apple-services ]]; then
+          printf '\n  The setup stopped during Apple services enablement. Retry: omarchy-macos-vm create\n'
+        else
+          printf '\n  The setup stopped. Retry: omarchy-macos-vm create\n'
+        fi
       else
         printf '\n  The setup stopped. Details: journalctl -u omarchy-macos-vm-setup\n'
       fi
@@ -395,9 +459,19 @@ available_storage_gb() {
 }
 
 # The launcher entry, like windows-vm.desktop: "macOS" in Super + Space.
+verify_desktop_entry() {
+  [[ -f $desktop_file && -s $desktop_file ]] &&
+    grep -Fqx '[Desktop Entry]' "$desktop_file" &&
+    grep -Eq '^Name=' "$desktop_file" &&
+    grep -Eq '^Exec=' "$desktop_file"
+}
+
 write_desktop_entry() {
-  mkdir -p "${desktop_file%/*}"
-  cat >"$desktop_file" <<'EOF'
+  local tmp
+  [[ ! -d $desktop_file ]] || return 1
+  mkdir -p "${desktop_file%/*}" || return 1
+  tmp=$(mktemp "${desktop_file%/*}/.macos-vm.desktop.XXXXXX") || return 1
+  if ! cat >"$tmp" <<'EOF' || ! mv -fT "$tmp" "$desktop_file"; then
 [Desktop Entry]
 Name=macOS
 Comment=Start the macOS VM (omvm) and open its window
@@ -408,6 +482,112 @@ Type=Application
 Categories=System;Virtualization;
 Keywords=omvm;macOS;VM;
 EOF
+    rm -f "$tmp"
+    return 1
+  fi
+  verify_desktop_entry
+}
+
+apple_services_explicitly_requested() {
+  ((request_apple_services)) && return 0
+  [[ ${OMARCHY_MACOS_VM_APPLE_SERVICES:-0} == 1 ]] && return 0
+  [[ $(setting APPLE_SERVICES 0) == 1 ]] && return 0
+  if [[ -f $marker ]]; then
+    python3 -I -c 'import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    ok = bool(d.get("apple_services")) or d.get("tier") == "apple-services"
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)' "$marker" 2>/dev/null && return 0
+  fi
+  return 1
+}
+
+apple_services_any_present() {
+  [[ -e $apple_sep_conf || -e $apple_template || -e $apple_provider || -e $apple_qemu ]]
+}
+
+apple_services_requested() {
+  apple_services_explicitly_requested || apple_services_any_present
+}
+
+active_tier() {
+  if apple_services_requested; then
+    echo "apple-services"
+  else
+    echo "basic"
+  fi
+}
+
+apple_services_missing_prereqs() {
+  local -a missing=()
+  [[ -e $apple_sep_conf ]] || missing+=("$apple_sep_conf")
+  [[ -s $apple_template ]] || missing+=("$apple_template")
+  [[ -s $apple_provider ]] || missing+=("$apple_provider")
+  [[ -x $apple_qemu ]] || missing+=("$apple_qemu")
+  [[ -x $apple_helper ]] || missing+=("$apple_helper")
+  if ((${#missing[@]})); then
+    local IFS=", "
+    printf '%s\n' "${missing[*]}"
+  fi
+}
+
+apple_services_imported() {
+  [[ -z $(apple_services_missing_prereqs) ]]
+}
+
+apple_services_enabled() {
+  [[ -e $omvm_images/vms/$vm_name/apple_services ]] &&
+    "${VIRSH[@]}" dumpxml --inactive "$vm_name" 2>/dev/null |
+    grep -q "relay-socket=/run/omvm-fairplay-managed-$vm_name/"
+}
+
+# Report every unsatisfied readiness requirement (empty output means fully ready).
+readiness_problems() {
+  local -a problems=()
+  local pstage fstage detail missing bad_stages
+  if [[ ! -e $state_dir/done ]]; then
+    problems+=("macOS VM stack is not installed ($state_dir/done missing)")
+  elif [[ $(system_stage) == failed ]]; then
+    problems+=("macOS VM stack setup failed ($(cat "$state_dir/last-error" 2>/dev/null || echo 'see journalctl -u omarchy-macos-vm-setup'))")
+  fi
+  pstage=$(progress_value stage)
+  if [[ $pstage == failed ]]; then
+    fstage=$(progress_value failed_stage)
+    detail=$(progress_value detail)
+    problems+=("setup failed${fstage:+ at $fstage}${detail:+: $detail}")
+  fi
+  if [[ -f $stages_file ]]; then
+    bad_stages=$(grep -E '=(failed|skipped)$' "$stages_file" | tr '\n' ',' | sed 's/,$//')
+    [[ -n $bad_stages ]] && problems+=("incomplete stages ($bad_stages)")
+  fi
+  vm_exists || problems+=("VM $vm_name is not defined in libvirt")
+  [[ -s $user_state/vm-created ]] || problems+=("completion marker missing ($user_state/vm-created)")
+  verify_desktop_entry || problems+=("macOS launcher missing or invalid ($desktop_file)")
+  if apple_services_requested; then
+    missing=$(apple_services_missing_prereqs)
+    if [[ -n $missing ]]; then
+      problems+=("Apple services requested/triggered but prerequisites are missing: $missing")
+    elif ! apple_services_enabled; then
+      problems+=("Apple services requested/triggered but not enabled on $vm_name")
+    fi
+  fi
+  if ((${#problems[@]})); then
+    local IFS="; "
+    printf '%s\n' "${problems[*]}"
+  fi
+}
+
+vm_ready() {
+  [[ -z $(readiness_problems) ]]
+}
+
+setup_failed() {
+  [[ ! -e $state_dir/done && $(system_stage) == failed ]] && return 0
+  [[ $(progress_value stage) == failed ]] && return 0
+  [[ -f $stages_file ]] && grep -Eq '=(failed|skipped)$' "$stages_file" && return 0
+  return 1
 }
 
 # The window omvm show brings up: reims-vgpu's own window in local mode, a VNC
@@ -437,12 +617,20 @@ wait_until_up() {
 
 # What is left before the VM exists, as one line for a notification.
 pending_step() {
+  local detail
   if [[ ! -e $state_dir/done ]]; then
     case $(system_stage) in
     waiting-for-internet) echo "Waiting for internet to set up the macOS VM: connect to Wi-Fi." ;;
-    installing | retrying) echo "Installing the macOS VM stack; the VM is created next." ;;
+    installing | retrying | checking-boot | host-setup | staging-macos-step) echo "Installing the macOS VM stack; the VM is created next." ;;
+    failed)
+      detail=$(cat "$state_dir/last-error" 2>/dev/null)
+      echo "Stack setup failed${detail:+: $detail}. See journalctl -u omarchy-macos-vm-setup."
+      ;;
     *) echo "Set up the stack first: Install > macOS in the Omarchy menu." ;;
     esac
+  elif [[ $(progress_value stage) == failed ]]; then
+    detail=$(progress_value detail)
+    echo "Setup failed${detail:+: $detail}. Retry: omarchy-macos-vm create"
   elif bundle_ingested || vmxfer_ready; then
     if bundle_ingested && ! on_side_kernel; then
       restart_step
@@ -493,10 +681,24 @@ install_stack() {
     echo "❌ The setup did not finish: $(sudo cat "$state_dir/last-error" 2>/dev/null || echo 'see journalctl -u omarchy-macos-vm-setup')" >&2
     return 1
   fi
-  systemctl --user start omarchy-macos-vm-user.service 2>/dev/null || omvm prepare || true
+  systemctl --user start omarchy-macos-vm-user.service 2>/dev/null || omvm prepare || {
+    echo "❌ Failed to prepare omvm for this user." >&2
+    return 1
+  }
 }
 
 install_macos() {
+  local arg
+  for arg in "$@"; do
+    case $arg in
+    --apple-services) request_apple_services=1 ;;
+    "") ;;
+    *)
+      echo "Unknown install option: $arg" >&2
+      return 1
+      ;;
+    esac
+  done
   trap "echo ''; echo 'Installation cancelled by user'; exit 1" INT
 
   supported_mac || {
@@ -604,7 +806,7 @@ install_macos() {
     exit 1
   fi
 
-  save_settings "${selected_ram%G}" "$selected_cores" || {
+  save_settings "${selected_ram%G}" "$selected_cores" "$request_apple_services" || {
     echo "❌ Failed to write $config_file." >&2
     exit 1
   }
@@ -616,9 +818,12 @@ install_macos() {
   fi
 
   install_stack || exit 1
-  write_desktop_entry
+  write_desktop_entry || {
+    echo "❌ Failed to create or verify the macOS launcher entry ($desktop_file)." >&2
+    exit 1
+  }
 
-  if vm_exists; then
+  if vm_ready; then
     echo ""
     echo "Applying the new settings to the existing macOS VM..."
     CPUS=$selected_cores RAM_GIB=${selected_ram%G} omvm virt "$vm_name" || exit 1
@@ -629,11 +834,15 @@ install_macos() {
   fi
 
   # Look on VMXFER for the macOS step's output now rather than at the next boot.
-  sudo systemctl start omarchy-macos-vm-vmxfer.service 2>/dev/null || true
-  if bundle_ingested || vmxfer_ready; then
+  if ! sudo systemctl start omarchy-macos-vm-vmxfer.service 2>/dev/null; then
+    echo "⚠️  Could not probe VMXFER via omarchy-macos-vm-vmxfer.service." >&2
+  fi
+  if bundle_ingested || vmxfer_ready || vm_exists; then
     echo ""
     echo "The restored macOS VM is on VMXFER: creating it now."
-    create_macos
+    local -a create_args=()
+    ((request_apple_services)) && create_args+=(--apple-services)
+    create_macos "${create_args[@]}"
     return
   fi
 
@@ -675,32 +884,100 @@ auto_defaults() {
   save_settings "$ram" "$cpus"
 }
 
-# ingest -> setup [--xcode] -> virt, each step skipped once done. Runs from
-# install, from each login until the VM exists (--auto), or by hand.
+# STAGE PERCENT MESSAGE [NOTIFY_BODY] [STAGE_OUTCOME]: fail closed and record diagnostics.
+fail_create() {
+  local failed_stage=$1 percent=$2 message=$3 notify_body=${4:-$3} outcome=${5:-failed}
+  rm -f "$user_state/vm-created"
+  set_stage_outcome "$failed_stage" "$outcome" || true
+  set_progress failed "${percent:-0}" "$message" "$failed_stage" || true
+  echo "❌ $message" >&2
+  notify -u critical "macOS VM setup failed ($failed_stage)" "$notify_body"
+  return 1
+}
+
+# Verify every required stage for TIER succeeded before marking the VM ready.
+verify_create_readiness() {
+  local tier=$1 stage
+  local -a required=(stack credentials ingest kernel setup virt launcher)
+  [[ $tier == apple-services ]] && required+=(apple_services)
+  for stage in "${required[@]}"; do
+    [[ $(stage_outcome "$stage") == ok ]] || {
+      echo "stage '$stage' did not succeed (recorded: $(stage_outcome "$stage"))"
+      return 1
+    }
+  done
+  [[ -e $state_dir/done && $(system_stage) != failed ]] || {
+    echo "macOS VM stack setup is not complete ($state_dir/done)"
+    return 1
+  }
+  bundle_ingested || { echo "VMXFER bundle is not ingested"; return 1; }
+  on_side_kernel || { echo "side kernel $side_kernel is not active"; return 1; }
+  account_created || { echo "guest image (*-v0) was not created by omvm setup"; return 1; }
+  vm_exists || { echo "VM $vm_name is not defined in libvirt"; return 1; }
+  if [[ $tier == apple-services ]]; then
+    apple_services_enabled || { echo "Apple services are not enabled on $vm_name"; return 1; }
+  fi
+  verify_desktop_entry || { echo "macOS launcher ($desktop_file) is missing or invalid"; return 1; }
+  return 0
+}
+
+# ingest -> setup [--xcode] -> virt [-> apple-services] -> launcher, each step
+# skipped only when already verified. Runs from install, from each login until
+# the VM is ready (--auto), or by hand.
 create_macos() {
-  local auto=0
-  [[ ${1:-} == --auto ]] && auto=1
-  if vm_exists; then
+  local auto=0 arg tier missing reason ready_detail tmp_created
+  for arg in "$@"; do
+    case $arg in
+    --auto) auto=1 ;;
+    --apple-services) request_apple_services=1 ;;
+    "") ;;
+    *)
+      echo "Unknown create option: $arg" >&2
+      return 1
+      ;;
+    esac
+  done
+  if vm_ready; then
     echo "The macOS VM $vm_name already exists. Launch 'macOS' via Super + Space"
     return 0
   fi
-  [[ -e $state_dir/done ]] || {
-    echo "The macOS VM stack is not installed. To set up: omarchy-macos-vm install" >&2
+  mkdir -p "$user_state" || {
+    echo "❌ Cannot create user state directory $user_state." >&2
     return 1
   }
-  if ! bundle_ingested && ! vmxfer_ready; then
-    print_pending >&2
+  # Fail-closed: never retain a stale completion marker across an incomplete run.
+  rm -f "$user_state/vm-created"
+  reset_stages || {
+    echo "❌ Cannot initialize stage tracking in $stages_file." >&2
+    return 1
+  }
+
+  if [[ ! -e $state_dir/done || $(system_stage) == failed ]]; then
+    local stack_err
+    stack_err=$(cat "$state_dir/last-error" 2>/dev/null || true)
+    fail_create stack 0 \
+      "The macOS VM stack is not installed${stack_err:+ ($stack_err)}. To set up: omarchy-macos-vm install"
     return 1
   fi
-  mkdir -p "$user_state"
+  set_stage_outcome stack ok
+
+  if ! bundle_ingested && ! vmxfer_ready; then
+    print_pending >&2
+    fail_create ingest 0 \
+      "No restored macOS VM found on VMXFER; complete the one-time macOS step before running omarchy-macos-vm create"
+    return 1
+  fi
+
   if credentials_pending && ! account_created; then
+    set_stage_outcome credentials waiting
+    set_progress restart-needed 0 "The account from the installer is handed over at the next boot."
     echo "The macOS username and password from the installer are handed over at the next boot; restart, then the VM is finished at the next login." >&2
     notify -u critical "macOS VM: restart to finish" "The account from the installer is handed over at the next boot."
     return 2
   fi
   if ((auto)); then
     auto_defaults || {
-      echo "❌ Failed to save the macOS VM settings." >&2
+      fail_create credentials 0 "Failed to save the macOS VM settings."
       return 1
     }
   fi
@@ -714,14 +991,19 @@ create_macos() {
     valid_account "${account:-}" || account=$(guest_user)
     valid_account "${account:-}" || account=$(id -un)
     valid_password "${password:-}" || password=$DEFAULT_PASSWORD
-    write_credentials "$account" "$password" || return 1
-  fi
-  if ! account_created; then
-    apply_credentials || {
-      echo "❌ Failed to hand the macOS account to omvm." >&2
+    write_credentials "$account" "$password" || {
+      fail_create credentials 0 "Failed to store the macOS account credentials ($credentials_file)."
       return 1
     }
   fi
+  if ! account_created; then
+    apply_credentials || {
+      fail_create credentials 0 "Failed to hand the macOS account to omvm."
+      return 1
+    }
+  fi
+  set_stage_outcome credentials ok
+
   : >"$create_log"
   if bundle_ingested; then
     set_progress setting-up 36 "Starting the setup"
@@ -733,8 +1015,9 @@ create_macos() {
     local available mnt
     available=$(available_storage_gb) || available=0
     if ((available < REQUIRED_SPACE_GB)); then
-      echo "❌ ${available}GB free; the macOS VM needs ${REQUIRED_SPACE_GB}GB in Omarchy." >&2
-      notify -u critical "macOS VM: not enough space" "It needs ${REQUIRED_SPACE_GB} GB free in Omarchy; ${available} GB is free."
+      fail_create ingest 1 \
+        "${available}GB free; the macOS VM needs ${REQUIRED_SPACE_GB}GB in Omarchy." \
+        "It needs ${REQUIRED_SPACE_GB} GB free in Omarchy; ${available} GB is free."
       return 1
     fi
     mnt=$(vmxfer_mount)
@@ -743,50 +1026,126 @@ create_macos() {
     notify "Creating the macOS VM" "Importing the VM restored in macOS (omvm ingest)"
     echo "Importing the VM restored in macOS (omvm ingest; this can take 10-20 minutes)..."
     tracked omvm ingest || {
-      echo "❌ omvm ingest failed." >&2
-      set_progress failed "$(progress_value percent)" "omvm ingest failed"
-      notify -u critical "macOS VM" "omvm ingest failed; run omarchy-macos-vm create to retry"
+      fail_create ingest "$(progress_value percent)" \
+        "omvm ingest failed; run omarchy-macos-vm create to retry"
       return 1
     }
+    if ! bundle_ingested; then
+      fail_create ingest "$(progress_value percent)" \
+        "omvm ingest exited without producing an ingested bundle (*-restore/.ingested); run omarchy-macos-vm create to retry" \
+        "omvm ingest did not produce an ingested bundle; run omarchy-macos-vm create to retry" \
+        skipped
+      return 1
+    fi
   fi
+  set_stage_outcome ingest ok
+
   if ! on_side_kernel; then
     echo ""
     echo "The rest needs the macOS VM kernel ($side_kernel)."
     restart_step
+    set_stage_outcome kernel restart-needed
     set_progress restart-needed 35 "$(restart_step)"
     notify -u critical -t 0 "macOS VM: restart to finish" "$(restart_step)"
     return 2
   fi
+  set_stage_outcome kernel ok
 
   local xcode=()
   [[ -f $omvm_images/Xcode.dmg ]] && xcode=(--xcode)
-  set_progress setting-up 40 "Setting up the guest (10-30 minutes)"
-  notify "Creating the macOS VM" "Setting up the guest (omvm setup${xcode:+ --xcode}); this takes 10-30 minutes"
-  echo "Setting up the guest (omvm setup ${xcode[*]})..."
-  if ! tracked omvm setup "${xcode[@]}"; then
-    echo "❌ omvm setup failed." >&2
-    set_progress failed "$(progress_value percent)" "omvm setup failed"
-    notify -u critical "macOS VM" "omvm setup failed; run omarchy-macos-vm create to retry"
+  if ! (account_created && vm_exists); then
+    set_progress setting-up 40 "Setting up the guest (10-30 minutes)"
+    notify "Creating the macOS VM" "Setting up the guest (omvm setup${xcode:+ --xcode}); this takes 10-30 minutes"
+    echo "Setting up the guest (omvm setup ${xcode[*]:-})..."
+    if ! tracked omvm setup ${xcode[@]+"${xcode[@]}"}; then
+      fail_create setup "$(progress_value percent)" \
+        "omvm setup failed; run omarchy-macos-vm create to retry"
+      return 1
+    fi
+    if ! account_created; then
+      fail_create setup "$(progress_value percent)" \
+        "omvm setup exited without creating the guest image (*-v0); run omarchy-macos-vm create to retry" \
+        "omvm setup did not create the guest image; run omarchy-macos-vm create to retry" \
+        skipped
+      return 1
+    fi
+  fi
+  set_stage_outcome setup ok
+
+  if ! vm_exists; then
+    set_progress setting-up 85 "Defining the VM"
+    CPUS=$(setting CPUS 8) RAM_GIB=$(setting RAM_GIB 16) tracked omvm virt "$vm_name" || {
+      fail_create virt "$(progress_value percent)" \
+        "omvm virt failed; run omarchy-macos-vm create to retry"
+      return 1
+    }
+    if ! vm_exists; then
+      fail_create virt "$(progress_value percent)" \
+        "omvm virt exited without defining VM $vm_name; run omarchy-macos-vm create to retry" \
+        "omvm virt did not define VM $vm_name; run omarchy-macos-vm create to retry" \
+        skipped
+      return 1
+    fi
+  fi
+  set_stage_outcome virt ok
+
+  tier=$(active_tier)
+  if [[ $tier == apple-services ]]; then
+    missing=$(apple_services_missing_prereqs)
+    if [[ -n $missing ]]; then
+      fail_create apple_services 90 \
+        "Apple services requested/triggered but prerequisites are missing ($missing); run: omarchy-macos-vm apple-services import old-root" \
+        "Apple services prerequisites missing ($missing). Run: omarchy-macos-vm apple-services import old-root, then omarchy-macos-vm create." \
+        skipped
+      return 1
+    fi
+    set_progress setting-up 90 "Enrolling the VM for Apple Account sign-in"
+    if ! tracked apple_services_enable; then
+      fail_create apple_services 90 \
+        "Apple services enablement failed for $vm_name; fix prerequisites/enrollment and retry: omarchy-macos-vm create"
+      return 1
+    fi
+    if ! apple_services_enabled; then
+      fail_create apple_services 90 \
+        "Apple services enablement exited without configuring $vm_name; retry: omarchy-macos-vm apple-services enable" \
+        "Apple services were not configured on $vm_name; retry: omarchy-macos-vm apple-services enable" \
+        skipped
+      return 1
+    fi
+    set_stage_outcome apple_services ok
+  else
+    set_stage_outcome apple_services not-requested
+  fi
+
+  set_progress setting-up 95 "Creating the macOS launcher"
+  if ! write_desktop_entry || ! verify_desktop_entry; then
+    fail_create launcher 95 \
+      "Failed to create or verify the macOS launcher ($desktop_file); check permissions and retry: omarchy-macos-vm create"
+    return 1
+  fi
+  set_stage_outcome launcher ok
+
+  if ! reason=$(verify_create_readiness "$tier"); then
+    fail_create readiness 99 "Setup readiness verification failed: $reason"
     return 1
   fi
 
-  set_progress setting-up 85 "Defining the VM"
-  CPUS=$(setting CPUS 8) RAM_GIB=$(setting RAM_GIB 16) tracked omvm virt "$vm_name" || {
-    echo "❌ omvm virt failed." >&2
-    set_progress failed "$(progress_value percent)" "omvm virt failed"
-    notify -u critical "macOS VM" "omvm virt failed; run omarchy-macos-vm create to retry"
+  tmp_created=$(mktemp "$user_state/.vm-created.XXXXXX") || {
+    fail_create readiness 99 "Failed to create temporary readiness marker in $user_state"
     return 1
   }
-  if apple_services_imported; then
-    set_progress setting-up 90 "Enrolling the VM for Apple Account sign-in"
-    tracked apple_services_enable ||
-      echo "⚠️  Apple services were not enabled; retry: omarchy-macos-vm apple-services enable" >&2
+  if ! date -u +%FT%TZ >"$tmp_created" || ! mv -f "$tmp_created" "$user_state/vm-created"; then
+    rm -f "$tmp_created"
+    fail_create readiness 99 "Failed to write readiness marker ($user_state/vm-created)"
+    return 1
   fi
-  write_desktop_entry
-  date -u +%FT%TZ >"$user_state/vm-created"
-  set_progress ready 100 "The macOS VM is ready"
+
+  ready_detail="The macOS VM is ready"
+  [[ $tier == apple-services ]] && ready_detail="The macOS VM is ready (with Apple services)"
+  set_progress ready 100 "$ready_detail"
   echo ""
   echo "macOS VM is ready! Launch 'macOS' via Super + Space"
+  [[ $tier == apple-services ]] && echo "Apple services: enabled"
   credential_lines
   notify "macOS VM ready — open it from Super+Space" "Opening it now; later, choose macOS in Super + Space"
   # Unattended: open it the way the "macOS" launcher entry does, once.
@@ -797,24 +1156,21 @@ create_macos() {
   fi
 }
 
-apple_services_imported() {
-  [[ -e /etc/omvm/sep-identity.conf && -s $apple_provider && -x $apple_qemu ]]
-}
-
 # The VM's FairPlay identifier is its IOPlatformUUID, read from the running
 # guest; enrollment needs every guest stopped, then the VM is redefined with
 # the identity device, the SEP socket and its FairPlay helper.
 apple_services_enable() {
-  apple_services_imported || {
-    echo "No Apple services on this Mac yet: omarchy-macos-vm apple-services import old-root" >&2
+  local missing
+  missing=$(apple_services_missing_prereqs)
+  if [[ -n $missing ]]; then
+    echo "Apple services prerequisites are missing ($missing): run omarchy-macos-vm apple-services import old-root" >&2
     return 1
-  }
+  fi
   vm_exists || {
     echo "The macOS VM $vm_name does not exist yet." >&2
     return 1
   }
-  if [[ -e $omvm_images/vms/$vm_name/apple_services ]] && "${VIRSH[@]}" dumpxml --inactive "$vm_name" 2>/dev/null |
-    grep -q "relay-socket=/run/omvm-fairplay-managed-$vm_name/"; then
+  if apple_services_enabled; then
     echo "$vm_name already has the Apple services."
     return 0
   fi
@@ -835,6 +1191,10 @@ apple_services_enable() {
   omvm stop "$vm_name" >/dev/null || return 1
   sudo "$apple_helper" enable "$vm_name" --uuid "$uuid" || return 1
   omvm virt "$vm_name" --experimental-apple-services || return 1
+  if ! apple_services_enabled; then
+    echo "❌ $vm_name was redefined, but Apple services verification failed (missing $omvm_images/vms/$vm_name/apple_services or FairPlay relay socket in libvirt XML)." >&2
+    return 1
+  fi
   echo "$vm_name: Apple services on (Apple Account sign-in in System Settings)."
 }
 
@@ -931,6 +1291,22 @@ launch_macos() {
     exit 1
   fi
 
+  if setup_failed && ! creating; then
+    local fstage detail
+    fstage=$(progress_value failed_stage)
+    detail=$(progress_value detail)
+    echo "❌ macOS VM setup did not finish${fstage:+ (failed at $fstage)}: ${detail:-see omarchy-macos-vm status}." >&2
+    echo "   Retry: omarchy-macos-vm create" >&2
+    notify -u critical "macOS VM setup incomplete" "${detail:-Run omarchy-macos-vm create to finish setup.}"
+    exit 1
+  fi
+  if apple_services_requested && ! apple_services_enabled; then
+    echo "❌ Apple services were requested/triggered for $vm_name but are not enabled." >&2
+    echo "   Finish setup: omarchy-macos-vm create" >&2
+    notify -u critical "macOS VM: Apple services not enabled" "Run omarchy-macos-vm create to finish Apple services setup."
+    exit 1
+  fi
+
   echo "Starting macOS VM..."
   if [[ $(vm_state) != running ]]; then
     notify "macOS VM" "Starting macOS VM…"
@@ -1014,6 +1390,23 @@ stop_macos() {
 }
 
 status_macos() {
+  if setup_failed; then
+    local fstage detail
+    if [[ ! -e $state_dir/done ]]; then
+      fstage=$(system_failed_stage)
+      detail=$(cat "$state_dir/last-error" 2>/dev/null || echo "see journalctl -u omarchy-macos-vm-setup")
+      echo "macOS VM setup failed${fstage:+ (stage: $fstage)}."
+      echo "Reason: $detail"
+      echo "Details: journalctl -u omarchy-macos-vm-setup"
+    else
+      fstage=$(progress_value failed_stage)
+      detail=$(progress_value detail)
+      echo "macOS VM setup failed${fstage:+ (stage: $fstage)}."
+      echo "Reason: ${detail:-$(readiness_problems)}"
+      echo "Retry: omarchy-macos-vm create"
+    fi
+    exit 1
+  fi
   if ! vm_exists; then
     echo "macOS VM not configured."
     if [[ -e $state_dir/done ]]; then
@@ -1022,6 +1415,16 @@ status_macos() {
       echo "To set up: omarchy-macos-vm install"
     fi
     exit 1
+  fi
+  if [[ -f $progress_file || -f $stages_file ]] || apple_services_requested; then
+    local problems
+    problems=$(readiness_problems)
+    if [[ -n $problems ]]; then
+      echo "macOS VM setup is incomplete (not ready)."
+      echo "Issues: $problems"
+      echo "Finish setup: omarchy-macos-vm create"
+      exit 1
+    fi
   fi
 
   local state mode display
@@ -1049,11 +1452,14 @@ status_macos() {
     credential_lines
     echo "To start: omarchy-macos-vm launch"
   fi
+  if apple_services_enabled; then
+    echo "Apple services: enabled"
+  fi
 }
 
 case "${1:-}" in
-install) install_macos ;;
-create) create_macos "${2:-}" ;;
+install) shift; install_macos "$@" ;;
+create) shift; create_macos "$@" ;;
 progress) show_progress ;;
 remove) remove_macos "${2:-}" ;;
 launch | start) launch_macos "${2:-}" ;;

@@ -36,18 +36,42 @@ boot_default_helper=${OMARCHY_MACOS_VM_BOOT_DEFAULT:-/usr/lib/omarchy-macos-vm/o
 # How long one run waits for internet before it exits 75 and the unit restarts.
 network_wait=${OMARCHY_MACOS_VM_NETWORK_WAIT:-900}
 
+current_stage=init
+stages_file=$state_dir/stages
+
 say() { printf 'omarchy-macos-vm-setup: %s\n' "$*"; }
+# Record explicit per-stage outcomes in $state_dir/stages (atomic update).
+set_stage_outcome() {
+  local stage=$1 outcome=$2 tmp
+  mkdir -p "$state_dir" || return 1
+  tmp=$(mktemp "$state_dir/.stages.XXXXXX") || return 1
+  {
+    [[ -f $stages_file ]] && grep -v "^$stage=" "$stages_file" || true
+    printf '%s=%s\n' "$stage" "$outcome"
+  } >"$tmp" && mv -f "$tmp" "$stages_file" || { rm -f "$tmp"; return 1; }
+}
+stage_outcome() { sed -n "s/^$1=//p" "$stages_file" 2>/dev/null | tail -1; }
+
 # fail MESSAGE [STATUS]: 75 is "try again" (the unit restarts); 1 needs the owner.
 fail() {
-  say "$1" >&2
-  mkdir -p "$state_dir" && printf '%s\n' "$1" >"$state_dir/last-error"
-  if [[ ${2:-1} == 75 ]]; then set_status retrying; else set_status failed; fi
-  exit "${2:-1}"
+  local msg=$1 code=${2:-1}
+  say "$msg" >&2
+  mkdir -p "$state_dir" && printf '%s\n' "$msg" >"$state_dir/last-error"
+  [[ -n ${current_stage:-} ]] && set_stage_outcome "$current_stage" failed || true
+  if [[ $code == 75 ]]; then set_status retrying "$current_stage"; else set_status failed "$current_stage"; fi
+  exit "$code"
 }
 
 # What the setup is doing, for omarchy-macos-vm launch and status (world-readable).
 set_status() {
-  mkdir -p "$state_dir" && printf 'stage=%s\nupdated=%s\n' "$1" "$(date -u +%FT%TZ)" >"$state_dir/status"
+  local stage=$1 failed_stage=${2:-} tmp
+  mkdir -p "$state_dir" || return 1
+  tmp=$(mktemp "$state_dir/.status.XXXXXX") || return 1
+  {
+    printf 'stage=%s\n' "$stage"
+    [[ -n $failed_stage ]] && printf 'failed_stage=%s\n' "$failed_stage"
+    printf 'updated=%s\n' "$(date -u +%FT%TZ)"
+  } >"$tmp" && mv -f "$tmp" "$state_dir/status" || { rm -f "$tmp"; return 1; }
 }
 
 users() { [[ -x $users_helper ]] && "$users_helper" "$@"; }
@@ -152,9 +176,15 @@ add_repository() {
 }
 
 install_stack() {
-  local repo dir
+  local repo dir missing=() package
   local -a archives=()
-  all_installed && { say "the macOS VM packages are installed"; return 0; }
+  current_stage=stack
+  set_stage_outcome stack pending
+  if all_installed; then
+    say "the macOS VM packages are installed"
+    set_stage_outcome stack ok
+    return 0
+  fi
   repo=$(marker_value repo)
   for dir in "$repo" "$state_dir/repo" "$esp/omarchy/macos-vm/repo"; do
     [[ -n $dir && $dir != https://* && -d $dir ]] || continue
@@ -178,8 +208,14 @@ install_stack() {
     pacman -S --needed --noconfirm "${packages[@]}" ||
       fail "the macOS VM packages are in no package directory and no repository (see BUILD.md)" 75
   fi
+  for package in "${packages[@]}"; do
+    is_installed "$package" || missing+=("$package")
+  done
+  (( ${#missing[@]} == 0 )) ||
+    fail "required macOS VM packages are still missing after install: ${missing[*]}" 75
   pacman -S --needed --noconfirm "${optional_packages[@]}" ||
     say "could not install ${optional_packages[*]}; omvm works without it"
+  set_stage_outcome stack ok
 }
 
 # The kernel's pacman hooks build its initramfs and, on a Limine Mac, its UKI
@@ -189,6 +225,9 @@ install_stack() {
 # update does.
 check_boot() {
   local conf=$esp/limine.conf
+  current_stage=boot
+  set_stage_outcome boot pending
+  set_status checking-boot
   if omarchy-mac-limine-active 2>/dev/null; then
     if [[ -x $boot_default_helper ]]; then
       "$boot_default_helper" enable || fail "could not make $side_kernel the default boot entry"
@@ -198,17 +237,22 @@ check_boot() {
       omarchy-mac-boot-update || fail "omarchy-mac-boot-update failed"
     fi
     grep -Fq "//$side_kernel" "$conf" || fail "$conf has no $side_kernel entry"
+    [[ -s $esp/EFI/Linux/omarchy_$side_kernel.efi ]] || fail "missing $side_kernel UKI ($esp/EFI/Linux/omarchy_$side_kernel.efi)"
   fi
   if command -v omarchy-apple-silicon-boot-check >/dev/null; then
     OMARCHY_BOOT_CHECK_ALLOW_PENDING_REBOOT=1 omarchy-apple-silicon-boot-check --boot-chain ||
       fail "the boot check fails with $side_kernel installed; the stock kernel's boot files need attention"
   fi
+  set_stage_outcome boot ok
 }
 
 # omvm's package ships its libvirt hook (qemu.d/50-omvm), udev rules, sysusers
 # and the udmabuf tmpfiles.d; apply those now rather than at the next boot, and
 # enable the per-user step.
 host_setup() {
+  current_stage=host
+  set_stage_outcome host pending
+  set_status host-setup
   systemd-sysusers omvm.conf 2>/dev/null || say "the omvm group appears after the next boot"
   systemd-tmpfiles --create omvm-udmabuf.conf 2>/dev/null || say "udmabuf limits apply after the next boot"
   systemctl --global enable omarchy-macos-vm-user.service omarchy-macos-vm-create.service omarchy-macos-vm-create.path ||
@@ -216,6 +260,7 @@ host_setup() {
   systemctl enable omarchy-macos-vm-vmxfer.service >/dev/null 2>&1 ||
     say "omarchy-macos-vm-vmxfer.service is enabled by its preset"
   systemctl disable omarchy-macos-vm-oneshot-restore.service >/dev/null 2>&1 || true
+  set_stage_outcome host ok
 }
 
 # Whether VMXFER already holds the restored VM (the developer installer's
@@ -238,6 +283,9 @@ vm_on_vmxfer() {
 # What is next for the owner. With the VM already on VMXFER, only a restart;
 # otherwise the one-time macOS step, staged on the ESP.
 stage_macos_step() {
+  current_stage=macos_step
+  set_stage_outcome macos_step pending
+  set_status staging-macos-step
   if vm_on_vmxfer; then
     {
       printf 'The restored macOS VM is on VMXFER (the installer made it before this first boot).\n\n'
@@ -247,33 +295,54 @@ stage_macos_step() {
       printf 'Then open "macOS" from the launcher (Super + Space).\n'
       printf 'Progress: omarchy-macos-vm progress (opens by itself in a terminal)\n'
     } >"$next_steps" || fail "cannot write $next_steps"
+    [[ -s $next_steps ]] || fail "$next_steps is empty"
     say "the restored VM is on VMXFER; next steps for the owner are in $next_steps"
+    set_stage_outcome macos_step ok
     return 0
   fi
   omvm macos-step >"$next_steps" 2>&1 || fail "omvm macos-step failed: $(tail -n 1 "$next_steps")"
   {
     printf '\nRestart to boot "%s" (set as default; stock linux-aurora stays in the Limine menu for recovery);\n' "$side_kernel"
     printf 'after the macOS step, the VM is finished at the next logins (omvm ingest, setup, virt).\n'
-  } >>"$next_steps"
+  } >>"$next_steps" || fail "cannot append to $next_steps"
+  [[ -s $next_steps ]] || fail "$next_steps is empty"
   say "next steps for the owner are in $next_steps"
+  set_stage_outcome macos_step ok
+}
+
+verify_setup_complete() {
+  local stage
+  for stage in stack boot host macos_step; do
+    [[ $(stage_outcome "$stage") == ok ]] || fail "setup stage '$stage' did not complete (state: $(stage_outcome "$stage"))"
+  done
+  all_installed || fail "required macOS VM packages are not all installed"
+  [[ -s $next_steps ]] || fail "missing $next_steps"
 }
 
 main() {
+  local pkg_versions
   [[ -e $marker ]] || { say "no $marker; nothing to do"; return 0; }
   [[ ! -e $done_stamp ]] || { say "already done ($done_stamp)"; return 0; }
   mkdir -p "$state_dir" || fail "cannot create $state_dir"
+  current_stage=hardware
   if [[ ${OMARCHY_MACOS_VM_SKIP_HW:-0} != 1 ]]; then
     grep -qs 'apple,arm-platform' "$root/proc/device-tree/compatible" || fail "not an Apple Silicon Mac"
     [[ $(getconf PAGESIZE) == 16384 ]] || fail "omvm needs a 16K-page kernel"
   fi
-  install_stack
-  check_boot
-  host_setup
-  stage_macos_step
+  install_stack || fail "install_stack failed"
+  check_boot || fail "check_boot failed"
+  host_setup || fail "host_setup failed"
+  stage_macos_step || fail "stage_macos_step failed"
+  current_stage=finalize
+  verify_setup_complete
+  pkg_versions=$(pacman -Q "${packages[@]}") || fail "cannot verify installed macOS VM package versions"
   {
     printf 'done=%s\n' "$(date -u +%FT%TZ)"
-    pacman -Q "${packages[@]}" 2>/dev/null | sed 's/^/package=/'
-  } >"$done_stamp.new" && mv -f "$done_stamp.new" "$done_stamp" || fail "cannot write $done_stamp"
+    printf '%s\n' "$pkg_versions" | sed 's/^/package=/'
+  } >"$done_stamp.new" && mv -f "$done_stamp.new" "$done_stamp" || {
+    rm -f "$done_stamp.new"
+    fail "cannot write $done_stamp"
+  }
   rm -f "$state_dir/last-error"
   set_status done
   systemctl disable omarchy-macos-vm-setup.service >/dev/null 2>&1 || true
