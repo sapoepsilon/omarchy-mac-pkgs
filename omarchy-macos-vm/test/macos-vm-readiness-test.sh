@@ -49,9 +49,12 @@ stub lsblk 'if [[ -n ${TEST_VMXFER_DEV:-} ]]; then printf "%s VMXFER\n" "$TEST_V
 stub findmnt 'exit 0'
 stub mount 'echo "mount $*" >>"$TEST_CALLS"; [[ -z ${TEST_MOUNT_FAIL:-} ]]'
 stub umount 'exit 0'
-stub systemd-tmpfiles 'exit 0'
-stub systemd-sysusers 'exit 0'
-stub systemctl 'echo "systemctl $*" >>"$TEST_CALLS"; [[ $* != *is-active* || -n ${TEST_CREATING:-} ]]'
+stub systemd-tmpfiles '[[ ${TEST_HOST_FAIL:-} != tmpfiles ]]'
+stub systemd-sysusers '[[ ${TEST_HOST_FAIL:-} != sysusers ]]'
+stub systemctl 'echo "systemctl $*" >>"$TEST_CALLS"
+[[ ${TEST_HOST_FAIL:-} != user-service || $* != --global* ]] || exit 1
+[[ ${TEST_HOST_FAIL:-} != vmxfer-service || $* != "enable omarchy-macos-vm-vmxfer.service" ]] || exit 1
+[[ $* != *is-active* || -n ${TEST_CREATING:-} ]]'
 stub systemd-run 'echo "systemd-run $*" >>"$TEST_CALLS"'
 stub omarchy-mac-limine-active 'exit 0'
 stub omarchy-mac-boot-update 'printf "/+Omarchy\n  //linux-aurora\n  //linux-aurora-vmapple\n" >"$OMARCHY_ESP/limine.conf"
@@ -60,6 +63,7 @@ if [[ -z ${TEST_SKIP_UKI:-} ]]; then
 fi'
 stub omarchy-apple-silicon-boot-check 'exit 0'
 stub users 'echo "users $*" >>"$TEST_CALLS"'
+stub boot-default '[[ -z ${TEST_BOOT_DEFAULT_FAIL:-} ]]'
 stub credentials 'echo "credentials $*" >>"$TEST_CALLS"'
 stub omvm 'echo "omvm $*" >>"$TEST_CALLS"
 case $1 in
@@ -124,6 +128,7 @@ printf '{"version":1,"requested_by":"installer"}\n' >"$root/etc/omarchy/macos-vm
 set +e
 env -u HOME OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_ESP="$root/boot/efi" OMARCHY_MACOS_VM_SKIP_HW=1 \
   OMARCHY_MACOS_VM_USERS="$stub_bin/users" OMARCHY_MACOS_VM_CREDENTIALS="$stub_bin/credentials" \
+  OMARCHY_MACOS_VM_BOOT_DEFAULT="$stub_bin/boot-default" \
   OMARCHY_MACOS_VM_NETWORK_WAIT=0 TEST_CALLS="$calls" TEST_INSTALLED="$test_tmp/installed" \
   TEST_PACMAN_SKIP=1 PATH="$stub_bin:$PATH" bash "$setup_bin" >"$test_tmp/out" 2>&1
 status=$?
@@ -143,6 +148,7 @@ printf '{"version":1,"requested_by":"installer"}\n' >"$root/etc/omarchy/macos-vm
 set +e
 env -u HOME OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_ESP="$root/boot/efi" OMARCHY_MACOS_VM_SKIP_HW=1 \
   OMARCHY_MACOS_VM_USERS="$stub_bin/users" OMARCHY_MACOS_VM_CREDENTIALS="$stub_bin/credentials" \
+  OMARCHY_MACOS_VM_BOOT_DEFAULT="$stub_bin/boot-default" \
   OMARCHY_MACOS_VM_NETWORK_WAIT=0 TEST_CALLS="$calls" TEST_INSTALLED="$test_tmp/installed" \
   TEST_SKIP_UKI=1 PATH="$stub_bin:$PATH" bash "$setup_bin" >"$test_tmp/out" 2>&1
 status=$?
@@ -162,6 +168,7 @@ printf '{"version":1,"requested_by":"installer"}\n' >"$root/etc/omarchy/macos-vm
 set +e
 env -u HOME OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_ESP="$root/boot/efi" OMARCHY_MACOS_VM_SKIP_HW=1 \
   OMARCHY_MACOS_VM_USERS="$stub_bin/users" OMARCHY_MACOS_VM_CREDENTIALS="$stub_bin/credentials" \
+  OMARCHY_MACOS_VM_BOOT_DEFAULT="$stub_bin/boot-default" \
   OMARCHY_MACOS_VM_NETWORK_WAIT=0 TEST_CALLS="$calls" TEST_INSTALLED="$test_tmp/installed" \
   TEST_MACOS_STEP_FAIL=1 PATH="$stub_bin:$PATH" bash "$setup_bin" >"$test_tmp/out" 2>&1
 status=$?
@@ -171,6 +178,50 @@ set -e
   grep -Fq 'omvm macos-step failed' "$root/var/lib/omarchy/macos-vm/last-error" ||
   fail "failed omvm macos-step fails closed" "status=$status $(cat "$test_tmp/out")"
 pass "failed omvm macos-step exits 1, records macos_step=failed and leaves no done stamp"
+
+# Required host setup operations must finish before any completion stamp is written.
+for host_failure in sysusers tmpfiles user-service vmxfer-service; do
+  root=$test_tmp/root-fail-$host_failure
+  mkdir -p "$root/etc/omarchy" "$root/var/lib/pacman" "$root/boot/efi"
+  printf '[options]\n' >"$root/etc/pacman.conf"
+  printf '{}\n' >"$root/etc/omarchy/macos-vm.enabled"
+  : >"$test_tmp/installed"
+  set +e
+  env -u HOME OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_ESP="$root/boot/efi" OMARCHY_MACOS_VM_SKIP_HW=1 \
+    OMARCHY_MACOS_VM_USERS="$stub_bin/users" OMARCHY_MACOS_VM_CREDENTIALS="$stub_bin/credentials" \
+    OMARCHY_MACOS_VM_BOOT_DEFAULT="$stub_bin/boot-default" OMARCHY_MACOS_VM_NETWORK_WAIT=0 \
+    TEST_HOST_FAIL="$host_failure" TEST_CALLS="$calls" TEST_INSTALLED="$test_tmp/installed" \
+    PATH="$stub_bin:$PATH" bash "$setup_bin" >"$test_tmp/out" 2>&1
+  status=$?
+  set -e
+  (( status == 1 )) && [[ ! -e $root/var/lib/omarchy/macos-vm/done ]] &&
+    grep -Fxq 'host=failed' "$root/var/lib/omarchy/macos-vm/stages" ||
+    fail "$host_failure failure must stop host setup" "status=$status $(cat "$test_tmp/out")"
+  pass "$host_failure failure leaves host=failed and no completion stamp"
+done
+
+# A missing or failed persistent boot helper cannot be skipped.
+for boot_failure in missing failed; do
+  root=$test_tmp/root-boot-$boot_failure
+  mkdir -p "$root/etc/omarchy" "$root/var/lib/pacman" "$root/boot/efi"
+  printf '[options]\n' >"$root/etc/pacman.conf"
+  printf '{}\n' >"$root/etc/omarchy/macos-vm.enabled"
+  : >"$test_tmp/installed"
+  boot_helper=$stub_bin/boot-default
+  [[ $boot_failure != missing ]] || boot_helper=$stub_bin/no-boot-helper
+  set +e
+  env -u HOME OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_ESP="$root/boot/efi" OMARCHY_MACOS_VM_SKIP_HW=1 \
+    OMARCHY_MACOS_VM_USERS="$stub_bin/users" OMARCHY_MACOS_VM_CREDENTIALS="$stub_bin/credentials" \
+    OMARCHY_MACOS_VM_BOOT_DEFAULT="$boot_helper" OMARCHY_MACOS_VM_NETWORK_WAIT=0 \
+    TEST_BOOT_DEFAULT_FAIL=1 TEST_CALLS="$calls" TEST_INSTALLED="$test_tmp/installed" \
+    PATH="$stub_bin:$PATH" bash "$setup_bin" >"$test_tmp/out" 2>&1
+  status=$?
+  set -e
+  (( status == 1 )) && [[ ! -e $root/var/lib/omarchy/macos-vm/done ]] &&
+    grep -Fxq 'boot=failed' "$root/var/lib/omarchy/macos-vm/stages" ||
+    fail "$boot_failure persistent boot helper must stop setup" "status=$status $(cat "$test_tmp/out")"
+  pass "$boot_failure persistent boot helper leaves boot=failed and no completion stamp"
+done
 
 # 1d. Per-user setup launcher failure fails closed
 uhome=$test_tmp/uhome-launcher-fail
@@ -191,7 +242,7 @@ mkdir -p "$root/var/lib/omarchy/macos-vm"
 touch "$root/var/lib/omarchy/macos-vm/vmxfer-ready"
 set +e
 env OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_MACOS_VM_VMXFER_MNT="$test_tmp/vmxfer-mnt" \
-  OMARCHY_MACOS_VM_CREDENTIALS="$stub_bin/credentials" TEST_CALLS="$calls" \
+  OMARCHY_MACOS_VM_CREDENTIALS="$stub_bin/credentials" OMARCHY_MACOS_VM_BOOT_DEFAULT="$stub_bin/boot-default" TEST_CALLS="$calls" \
   TEST_VMXFER_DEV=/dev/nvme0n1p3 TEST_MOUNT_FAIL=1 PATH="$stub_bin:$PATH" \
   bash "$vmxfer_bin" >"$test_tmp/out" 2>&1
 status=$?
@@ -490,3 +541,55 @@ run_cli status
 (( status == 0 )) && ! grep -Fq 'Apple services: enabled' "$test_tmp/out" ||
   fail "clean basic-tier status must succeed without claiming Apple services" "$(cat "$test_tmp/out")"
 pass "clean full basic-tier run writes ready only after all required basic stages succeed"
+
+# Existing domains and stale ready markers do not replace required stage evidence.
+rm -f "$stages" "$vm_created"
+run_login_cli
+(( login_status == 1 )) && [[ ! -e $vm_created ]] ||
+  fail "login must not manufacture completion evidence for an unverified domain"
+run_cli status
+(( status == 1 )) && grep -Fq 'incomplete' "$test_tmp/out" ||
+  fail "status must reject an existing domain with missing stage evidence" "$(cat "$test_tmp/out")"
+run_cli create --auto
+(( status == 0 )) || fail "create must recover missing readiness evidence" "$(cat "$test_tmp/out")"
+printf 'launcher=pending\n' >>"$stages"
+run_login_cli
+(( login_status == 1 )) || fail "login must reject a pending required stage"
+run_cli status
+(( status == 1 )) || fail "status must reject a pending required stage"
+run_cli progress
+(( status == 1 )) && ! grep -Fq 'macOS VM ready: open it' "$test_tmp/out" ||
+  fail "progress must reject a pending required stage" "$(cat "$test_tmp/out")"
+run_cli launch
+(( status == 1 )) && ! grep -q '^omvm start ' "$calls" ||
+  fail "launch must not start a VM with a pending required stage"
+pass "missing and pending stage evidence is rejected across login, status, progress and launch"
+
+# Optional tools do not opt a basic VM into Apple services.
+reset_cli
+touch "$state/done" "$state/vmxfer-ready" "$kvm_param"
+mkdir -p "$test_tmp/apple"
+printf '#!/bin/bash\nexit 0\n' >"$apple_qemu"
+chmod +x "$apple_qemu"
+printf '{"provider":{}}\n' >"$apple_template"
+run_cli create --auto
+(( status == 0 )) && [[ $(pval tier) == basic && $(sval apple_services) == not-requested ]] ||
+  fail "inert optional Apple tools must not opt into Apple services" "$(cat "$test_tmp/out")"
+run_login_cli
+(( login_status == 0 )) || fail "login must accept verified basic VM with inert optional tools"
+pass "inert optional Apple helper binaries and templates keep the basic tier"
+
+# Explicit basic selection takes precedence over a partially imported legacy tier.
+printf '{"tier":"basic"}\n' >"$marker"
+printf 'partial legacy configuration\n' >"$apple_sep_conf"
+rm -f "$vm_created"
+run_cli create --auto
+(( status == 0 )) && [[ $(pval tier) == basic ]] ||
+  fail "explicit basic tier must ignore unused legacy Apple configuration" "$(cat "$test_tmp/out")"
+run_login_cli
+(( login_status == 0 )) || fail "login must respect explicit basic tier"
+rm -f "$marker" "$vm_created"
+run_cli create --auto
+(( status == 1 )) && [[ $(pval failed_stage) == apple_services ]] ||
+  fail "partially imported legacy identity must still fail closed without explicit basic selection" "$(cat "$test_tmp/out")"
+pass "explicit basic tier wins while partial legacy Apple setup still fails closed"

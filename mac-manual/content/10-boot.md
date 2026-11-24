@@ -35,6 +35,8 @@ There is one kernel, `linux-aurora`, built in omarchy-pkgs from a pinned commit 
 
 Such a kernel can declare itself a side kernel with an empty file named after its package base in `/usr/share/omarchy-mac-boot/side-kernels.d/`, as `linux-aurora-vmapple` (macOS guest VMs) does. The boot check then accepts it running, or first in the Limine menu as long as its UKI is on the ESP, and still checks `linux-aurora`'s own entry; an undeclared second kernel in either place fails the check.
 
+When the macOS VM package is enabled, `linux-aurora-vmapple` becomes the persistent default. `linux-aurora` stays installed and selectable in Limine for recovery. `/etc/omarchy-mac-boot/default-side-kernel` records that choice, and the boot package reapplies it when kernel updates rebuild the menu. Removing the macOS VM restores the stock kernel as the default; normal reboots do not undo the VM kernel choice.
+
 ## Initramfs
 
 The initramfs is systemd-based. Omarchy sets the platform's baseline of mkinitcpio hooks, and `omarchy-mac-boot` adds Apple fragments on top, in order, rather than overwriting it. The fragments only apply on an Apple Silicon Mac:

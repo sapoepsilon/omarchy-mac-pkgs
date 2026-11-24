@@ -488,28 +488,38 @@ EOF
   verify_desktop_entry
 }
 
-apple_services_explicitly_requested() {
-  ((request_apple_services)) && return 0
-  [[ ${OMARCHY_MACOS_VM_APPLE_SERVICES:-0} == 1 ]] && return 0
-  [[ $(setting APPLE_SERVICES 0) == 1 ]] && return 0
-  if [[ -f $marker ]]; then
-    python3 -I -c 'import json, sys
+apple_services_selection() {
+  local selected
+  ((request_apple_services)) && { echo apple-services; return; }
+  case ${OMARCHY_MACOS_VM_APPLE_SERVICES:-} in
+    1) echo apple-services; return ;;
+    0) echo basic; return ;;
+  esac
+  selected=$(sed -n 's/^APPLE_SERVICES=//p' "$config_file" 2>/dev/null | tail -1)
+  case $selected in
+    1) echo apple-services; return ;;
+    0) echo basic; return ;;
+  esac
+  [[ -f $marker ]] || return 0
+  python3 -I -c 'import json, sys
 try:
     d = json.load(open(sys.argv[1]))
-    ok = bool(d.get("apple_services")) or d.get("tier") == "apple-services"
+    if d.get("tier") in ("basic", "apple-services"):
+        print(d["tier"])
+    elif isinstance(d.get("apple_services"), bool):
+        print("apple-services" if d["apple_services"] else "basic")
 except Exception:
-    ok = False
-sys.exit(0 if ok else 1)' "$marker" 2>/dev/null && return 0
-  fi
-  return 1
-}
-
-apple_services_any_present() {
-  [[ -e $apple_sep_conf || -e $apple_template || -e $apple_provider || -e $apple_qemu ]]
+    pass' "$marker" 2>/dev/null
 }
 
 apple_services_requested() {
-  apple_services_explicitly_requested || apple_services_any_present
+  case $(apple_services_selection) in
+    apple-services) return 0 ;;
+    basic) return 1 ;;
+  esac
+  # Imported identity or VM enrollment is a partial legacy Apple-services setup.
+  # An installed helper executable or template alone does not request that tier.
+  [[ -e $apple_sep_conf || -e $apple_provider || -e $omvm_images/vms/$vm_name/apple_services ]]
 }
 
 active_tier() {
@@ -546,7 +556,7 @@ apple_services_enabled() {
 # Report every unsatisfied readiness requirement (empty output means fully ready).
 readiness_problems() {
   local -a problems=()
-  local pstage fstage detail missing bad_stages
+  local pstage fstage detail missing bad_stages stage
   if [[ ! -e $state_dir/done ]]; then
     problems+=("macOS VM stack is not installed ($state_dir/done missing)")
   elif [[ $(system_stage) == failed ]]; then
@@ -558,8 +568,12 @@ readiness_problems() {
     detail=$(progress_value detail)
     problems+=("setup failed${fstage:+ at $fstage}${detail:+: $detail}")
   fi
+  [[ $pstage == ready ]] || problems+=("setup has no verified ready result")
+  for stage in stack credentials ingest kernel setup virt launcher; do
+    [[ $(stage_outcome "$stage") == ok ]] || problems+=("stage '$stage' is not verified")
+  done
   if [[ -f $stages_file ]]; then
-    bad_stages=$(grep -E '=(failed|skipped)$' "$stages_file" | tr '\n' ',' | sed 's/,$//')
+    bad_stages=$(grep -E '=(failed|skipped|pending)$' "$stages_file" | tr '\n' ',' | sed 's/,$//')
     [[ -n $bad_stages ]] && problems+=("incomplete stages ($bad_stages)")
   fi
   vm_exists || problems+=("VM $vm_name is not defined in libvirt")
@@ -1142,7 +1156,10 @@ create_macos() {
 
   ready_detail="The macOS VM is ready"
   [[ $tier == apple-services ]] && ready_detail="The macOS VM is ready (with Apple services)"
-  set_progress ready 100 "$ready_detail"
+  if ! set_progress ready 100 "$ready_detail"; then
+    fail_create readiness 99 "Failed to record completed setup progress"
+    return 1
+  fi
   echo ""
   echo "macOS VM is ready! Launch 'macOS' via Super + Space"
   [[ $tier == apple-services ]] && echo "Apple services: enabled"
@@ -1307,6 +1324,12 @@ launch_macos() {
     exit 1
   fi
 
+  if ! vm_ready; then
+    echo "macOS VM setup is incomplete: $(readiness_problems)" >&2
+    notify -u critical "macOS VM setup incomplete" "Run omarchy-macos-vm create to verify and finish setup."
+    exit 1
+  fi
+
   echo "Starting macOS VM..."
   if [[ $(vm_state) != running ]]; then
     notify "macOS VM" "Starting macOS VM…"
@@ -1416,15 +1439,13 @@ status_macos() {
     fi
     exit 1
   fi
-  if [[ -f $progress_file || -f $stages_file ]] || apple_services_requested; then
-    local problems
-    problems=$(readiness_problems)
-    if [[ -n $problems ]]; then
-      echo "macOS VM setup is incomplete (not ready)."
-      echo "Issues: $problems"
-      echo "Finish setup: omarchy-macos-vm create"
-      exit 1
-    fi
+  local problems
+  problems=$(readiness_problems)
+  if [[ -n $problems ]]; then
+    echo "macOS VM setup is incomplete (not ready)."
+    echo "Issues: $problems"
+    echo "Finish setup: omarchy-macos-vm create"
+    exit 1
   fi
 
   local state mode display

@@ -28,33 +28,53 @@ vm_name=${OMVM_VM:-macos}
 unit=omarchy-macos-vm-creating
 progress_cmd="omarchy-launch-floating-terminal-with-presentation 'omarchy-macos-vm progress'"
 apple_provider=${XDG_CONFIG_HOME:-$HOME/.config}/omvm/apple-services/identity-provider.json
-apple_qemu=${OMVM_APPLE_QEMU:-/usr/lib/omvm-apple-services/qemu-system-aarch64}
 apple_sep_conf=${OMARCHY_MACOS_VM_APPLE_SEP_CONF:-/etc/omvm/sep-identity.conf}
-apple_template=${OMARCHY_MACOS_VM_APPLE_TEMPLATE:-/etc/omvm/apple-helpers.template.json}
 
 progress_value() { sed -n "s/^$1=//p" "$progress_file" 2>/dev/null | tail -1; }
-apple_services_requested() {
-  [[ ${OMARCHY_MACOS_VM_APPLE_SERVICES:-0} == 1 ]] && return 0
-  [[ $(sed -n 's/^APPLE_SERVICES=//p' "$config_file" 2>/dev/null | tail -1) == 1 ]] && return 0
-  if [[ -f $marker ]]; then
-    python3 -I -c 'import json, sys
+apple_services_selection() {
+  local selected
+  case ${OMARCHY_MACOS_VM_APPLE_SERVICES:-} in
+    1) echo apple-services; return ;;
+    0) echo basic; return ;;
+  esac
+  selected=$(sed -n 's/^APPLE_SERVICES=//p' "$config_file" 2>/dev/null | tail -1)
+  case $selected in
+    1) echo apple-services; return ;;
+    0) echo basic; return ;;
+  esac
+  [[ -f $marker ]] || return 0
+  python3 -I -c 'import json, sys
 try:
     d = json.load(open(sys.argv[1]))
-    ok = bool(d.get("apple_services")) or d.get("tier") == "apple-services"
+    if d.get("tier") in ("basic", "apple-services"):
+        print(d["tier"])
+    elif isinstance(d.get("apple_services"), bool):
+        print("apple-services" if d["apple_services"] else "basic")
 except Exception:
-    ok = False
-sys.exit(0 if ok else 1)' "$marker" 2>/dev/null && return 0
-  fi
-  [[ -e $apple_sep_conf || -e $apple_template || -e $apple_provider || -e $apple_qemu ]]
+    pass' "$marker" 2>/dev/null
 }
+
+apple_services_requested() {
+  case $(apple_services_selection) in
+    apple-services) return 0 ;;
+    basic) return 1 ;;
+  esac
+  # Imported identity or VM enrollment is a partial legacy Apple-services setup.
+  # An installed helper executable or template alone does not request that tier.
+  [[ -e $apple_sep_conf || -e $apple_provider || -e $images/vms/$vm_name/apple_services ]]
+}
+
 setup_incomplete_or_failed() {
-  local pstage
+  local pstage stage
   pstage=$(progress_value stage)
-  [[ $pstage == failed ]] && return 0
-  [[ -f $progress_file && $pstage != ready ]] && return 0
-  [[ -f $stages_file ]] && grep -Eq '=(failed|skipped|pending)$' "$stages_file" && return 0
-  if apple_services_requested && [[ ! -e $images/vms/$vm_name/apple_services ]]; then
-    return 0
+  [[ $pstage == ready && -s $stages_file && -s $created ]] || return 0
+  for stage in stack credentials ingest kernel setup virt launcher; do
+    [[ $(sed -n "s/^$stage=//p" "$stages_file" | tail -1) == ok ]] || return 0
+  done
+  grep -Eq '=(failed|skipped|pending)$' "$stages_file" && return 0
+  if apple_services_requested; then
+    [[ $(sed -n 's/^apple_services=//p' "$stages_file" | tail -1) == ok &&
+      -e $images/vms/$vm_name/apple_services ]] || return 0
   fi
   return 1
 }
@@ -82,7 +102,6 @@ if omvm mode "$vm_name" >/dev/null 2>&1; then
       --exec "$progress_cmd"
     exit 1
   fi
-  mkdir -p "${created%/*}" && date -u +%FT%TZ >"$created" || exit 1
   exit 0
 fi
 

@@ -9,8 +9,8 @@
 
 set -euo pipefail
 
-package=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-repo=$(cd -- "$package/.." && pwd)
+repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+package=$repo/omarchy-macos-vm
 boot_default=$package/bin/omarchy-macos-vm-boot-default
 boot_order_bin=$repo/omarchy-mac-boot/bin/omarchy-mac-limine-boot-order
 mac_kernel_bin=$repo/omarchy-mac-boot/bin/omarchy-mac-kernel
@@ -208,8 +208,8 @@ TEST_NOT_LIMINE=1 run enable
   fail "non-Limine Mac is left untouched"
 rm -f "$root/usr/share/omarchy-mac-boot/side-kernels.d/linux-aurora-vmapple"
 run enable
-(( status == 0 )) && [[ ! -e $root/etc/omarchy-mac-boot/default-side-kernel ]] && [[ $(first_kernel) == linux-aurora ]] ||
-  fail "undeclared side kernel is not promoted"
+(( status == 1 )) && [[ ! -e $root/etc/omarchy-mac-boot/default-side-kernel ]] && [[ $(first_kernel) == linux-aurora ]] ||
+  fail "undeclared side kernel is rejected"
 pass "non-Limine Macs and undeclared side kernels are safely left untouched"
 
 # 7. Legacy oneshot units/scripts are gone and package install scriptlet is wired.
@@ -222,3 +222,20 @@ grep -Fxq 'install=omarchy-macos-vm.install' "$package/pkgbuilds/omarchy-macos-v
   bash -n "$package/pkgbuilds/omarchy-macos-vm/omarchy-macos-vm.install" ||
   fail "PKGBUILD wires a valid omarchy-macos-vm.install scriptlet"
 pass "legacy oneshot restore is removed and package install scriptlet is valid"
+
+# A rebuild that silently keeps the old order cannot be reported as persistent.
+new_root
+mv "$stub_bin/omarchy-mac-boot-update" "$stub_bin/boot-update-working"
+printf '#!/bin/bash\nexit 0\n' >"$stub_bin/omarchy-mac-boot-update"
+chmod +x "$stub_bin/omarchy-mac-boot-update"
+run enable
+(( status == 1 )) && grep -Fq 'does not put linux-aurora-vmapple first' "$test_tmp/out" ||
+  fail "a skipped boot-order rebuild must fail" "$(cat "$test_tmp/out")"
+mv "$stub_bin/boot-update-working" "$stub_bin/omarchy-mac-boot-update"
+run enable
+(( status == 0 )) || fail "a corrected rebuild recovers" "$(cat "$test_tmp/out")"
+sed -i '/^[[:space:]]*\/\/linux-aurora$/d' "$root/boot/efi/limine.conf"
+run enable
+(( status == 1 )) && grep -Fq 'no stock recovery entry' "$test_tmp/out" ||
+  fail "a menu missing the stock recovery entry must fail" "$(cat "$test_tmp/out")"
+pass "boot verification rejects a skipped rebuild and a missing stock recovery entry"

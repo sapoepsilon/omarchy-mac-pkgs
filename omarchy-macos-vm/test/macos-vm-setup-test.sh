@@ -294,8 +294,16 @@ touch "$kvm"
 run_login
 grep -q '^systemd-run .*create --auto' "$calls" || fail "on the side kernel login finishes the VM" "$(cat "$calls")"
 TEST_VM=1 run_login
-! grep -q '^systemd-run' "$calls" && [[ -s $user_home/.local/state/omarchy-macos-vm/vm-created ]] ||
-  fail "once the VM exists login stops for good" "$(cat "$calls")"
+(( status == 1 )) && [[ ! -e $user_home/.local/state/omarchy-macos-vm/vm-created ]] ||
+  fail "an existing VM without readiness evidence must not get a completion marker" "$(cat "$calls")"
+login_state=$user_home/.local/state/omarchy-macos-vm
+mkdir -p "$login_state"
+printf 'stage=ready\n' >"$login_state/progress"
+for stage in stack credentials ingest kernel setup virt launcher; do printf '%s=ok\n' "$stage"; done >"$login_state/stages"
+printf 'verified\n' >"$login_state/vm-created"
+TEST_VM=1 run_login
+(( status == 0 )) && ! grep -q '^systemd-run' "$calls" ||
+  fail "a verified VM needs no further login setup" "$(cat "$calls")"
 unit=$package/files/usr/lib/systemd/user/omarchy-macos-vm-create.service
 grep -Fq 'ConditionPathExists=!%h/.local/state/omarchy-macos-vm/vm-created' "$unit" && grep -Fxq 'WantedBy=graphical-session.target' "$unit" ||
   fail "the login unit runs at graphical login until the VM is created"

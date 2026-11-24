@@ -99,7 +99,11 @@ mkdir -p "$test_tmp/side-kernels.d"
 printf 'linux-aurora-vmapple\n' >"$test_tmp/default-side-kernel"
 cat >"$stub_bin/pacman" <<'SH'
 #!/bin/bash
-[[ $1 == -Qq ]] && printf 'linux-aurora\nlinux-aurora-vmapple\n'
+case $1 in
+  -Qq) printf 'linux-aurora\nlinux-aurora-vmapple\n' ;;
+  -Q) [[ $2 == linux-aurora || $2 == linux-aurora-vmapple ]] ;;
+  *) exit 1 ;;
+esac
 SH
 chmod +x "$stub_bin/pacman"
 printf 'ESP_PATH="/boot/efi"\nBOOT_ORDER="linux-aurora, *, *fallback, Snapshots"\nKERNEL_CMDLINE[default]="stale"\n' >"$limine_default"

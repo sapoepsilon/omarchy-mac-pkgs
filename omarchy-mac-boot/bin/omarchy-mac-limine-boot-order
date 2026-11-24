@@ -70,7 +70,7 @@ detect_stock_kernel() {
 is_declared_installed_side() {
   local side=$1
   valid_kernel_name "$side" && [[ -f $side_kernel_dir/$side ]] &&
-    pacman -Qq 2>/dev/null | grep -Fxq -- "$side"
+    pacman -Q "$side" >/dev/null 2>&1
 }
 
 # Build a deduplicated, comma-space-separated BOOT_ORDER:

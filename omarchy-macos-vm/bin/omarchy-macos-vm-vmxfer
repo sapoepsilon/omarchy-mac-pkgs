@@ -27,8 +27,11 @@ say() { printf 'omarchy-macos-vm-vmxfer: %s\n' "$*"; }
 
 # Ensure linux-aurora-vmapple stays the persistent default Limine entry while
 # the stack is enabled (and clean up any legacy oneshot-boot state).
-if [[ -x $boot_default ]]; then
-  "$boot_default" enable || say "could not ensure linux-aurora-vmapple is the default boot entry"
+if [[ ! -x $boot_default ]] || ! "$boot_default" enable; then
+  rm -f "$stamp"
+  mkdir -p "$state_dir" && printf 'cannot ensure linux-aurora-vmapple is the default boot entry\n' >"$state_dir/vmxfer-error" || true
+  say "could not ensure linux-aurora-vmapple is the default boot entry" >&2
+  exit 1
 fi
 
 # Every boot until it is done: the installer's macOS account to the owner

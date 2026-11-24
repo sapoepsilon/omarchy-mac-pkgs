@@ -172,7 +172,7 @@ enable() {
   }
   if [[ ! -f $side_kernel_dir/$side_kernel ]] || ! pacman -Q "$side_kernel" >/dev/null 2>&1; then
     say "$side_kernel is not installed as a declared side kernel; leaving the default boot entry unchanged"
-    return 0
+    return 1
   fi
 
   mkdir -p "${default_side_file%/*}" || { say "cannot create ${default_side_file%/*}"; return 1; }
@@ -196,6 +196,9 @@ enable() {
   fi
 
   [[ -f $conf ]] || { say "no $conf after boot update"; return 1; }
+  [[ $(first_kernel) == "$side_kernel" ]] || { say "$conf does not put $side_kernel first"; return 1; }
+  [[ -n $(entry_number "$(detect_stock_kernel)") ]] || { say "$conf has no stock recovery entry"; return 1; }
+  [[ -s $esp/EFI/Linux/omarchy_$side_kernel.efi ]] || { say "missing $side_kernel UKI"; return 1; }
   number=$(entry_number "$side_kernel")
   [[ -n $number ]] || { say "$conf has no $side_kernel entry"; return 1; }
   cur=$(current_default)

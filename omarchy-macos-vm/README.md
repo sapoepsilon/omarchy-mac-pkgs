@@ -58,3 +58,9 @@ With that on the host, `create` enrolls the new VM by itself (its IOPlatformUUID
 ## Tests
 
 `test/all` runs the setup script against a staged root with pacman, systemctl, omvm and the boot tools stubbed, and `omarchy-macos-vm`'s progress, launcher and progress view against stubbed omvm and systemd.
+
+## Readiness and optional Apple services
+
+Setup is ready only after the required host operations, persistent boot selection, VM creation, and launcher checks succeed. A failed host group, device-permission setup, service enablement, or boot helper leaves the completion stamp unwritten. Existing libvirt domains without successful stage records must be verified with `omarchy-macos-vm create` before the launcher reports them ready.
+
+The basic tier does not require Apple-services helpers. Installed helper binaries or templates alone do not enable that tier. An explicit `tier: "basic"` in the installer marker or `APPLE_SERVICES=0` setting keeps the basic profile even if unused Apple-services files exist. Without an explicit choice, a partially imported SEP identity or enrolled VM still requires Apple-services verification and fails closed if its prerequisites are missing.

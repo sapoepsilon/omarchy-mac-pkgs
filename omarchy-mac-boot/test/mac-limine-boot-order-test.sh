@@ -19,8 +19,11 @@ mkdir -p "$stub_bin" "$root/etc/default" "$root/etc/omarchy-mac-boot" "$root/usr
 
 cat >"$stub_bin/pacman" <<'SH'
 #!/bin/bash
-[[ $1 == -Qq ]] || exit 1
-cat "$TEST_INSTALLED"
+case $1 in
+  -Qq) cat "$TEST_INSTALLED" ;;
+  -Q) grep -Fxq -- "$2" "$TEST_INSTALLED" ;;
+  *) exit 1 ;;
+esac
 SH
 chmod +x "$stub_bin/pacman"
 ln -s "$ROOT/bin/omarchy-mac-kernel" "$stub_bin/omarchy-mac-kernel"

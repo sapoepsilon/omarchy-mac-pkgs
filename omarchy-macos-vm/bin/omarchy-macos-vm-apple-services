@@ -26,6 +26,7 @@ import glob
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import pwd
 import re
@@ -259,7 +260,7 @@ def import_sep(src, uid, os_uuid):
     os.chmod(SEP_CONF.parent, 0o755)
     # The source's own apple-sep build: the in-tree one lacks the attestation
     # export the signer verifies its key with.
-    release = os.uname().release
+    release = platform.release()
     theirs = under(src, f'/usr/lib/modules/{release}/kernel/drivers/soc/apple/apple-sep.ko')
     ours = run(['modinfo', '-n', 'apple_sep']).strip()
     params = lambda path: run(['modinfo', '-F', 'parm', str(path)])
