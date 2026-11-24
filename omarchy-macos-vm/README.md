@@ -53,7 +53,7 @@ With that on the host, `create` enrolls the new VM by itself (its IOPlatformUUID
 
 ## Recipes
 
-`pkgbuilds/` holds the recipes for the stack and for this package; [BUILD.md](../BUILD.md) has the commands. `linux-aurora-vmapple` builds the owner's fork branch `sapoepsilon/linux-aurora` `vmapple/kvm-macos-guest`, whose two KVM commits are GPL-2.0.
+`pkgbuilds/` holds the recipes for the stack and for this package; [BUILD.md](BUILD.md) has the commands. `linux-aurora-vmapple` builds the owner's fork branch `sapoepsilon/linux-aurora` `vmapple/kvm-macos-guest`, whose two KVM commits are GPL-2.0.
 
 ## Tests
 

@@ -677,7 +677,7 @@ install_stack() {
   fi
   if omarchy-pkg-missing omarchy-macos-vm; then
     omarchy-pkg-add omarchy-macos-vm || {
-      echo "❌ omarchy-macos-vm is in no repository this Mac uses (see omarchy-mac-pkgs macos-vm BUILD.md)." >&2
+      echo "❌ omarchy-macos-vm is in no repository this Mac uses (see omarchy-mac-pkgs macos-vm omarchy-macos-vm/BUILD.md)." >&2
       return 1
     }
   fi

@@ -166,7 +166,7 @@ archives_in() {
 add_repository() {
   local url=$1 conf=$root/etc/pacman.d/omarchy-macos-vm.conf
   [[ $url =~ ^https://[A-Za-z0-9._~:/%@+-]+$ ]] || fail "the marker's repo $url is not an https:// URL"
-  # The owner's own private repository, built on their own Mac (BUILD.md).
+  # The owner's own private repository, built on their own Mac (omarchy-macos-vm/BUILD.md).
   mkdir -p "${conf%/*}" || fail "cannot create ${conf%/*}"
   printf '[omarchy-macos-vm]\nSigLevel = Optional TrustAll\nServer = %s\n' "$url" >"$conf" ||
     fail "cannot write $conf"
@@ -206,7 +206,7 @@ install_stack() {
       pacman -Sy --noconfirm || fail "cannot refresh the package databases" 75
     fi
     pacman -S --needed --noconfirm "${packages[@]}" ||
-      fail "the macOS VM packages are in no package directory and no repository (see BUILD.md)" 75
+      fail "the macOS VM packages are in no package directory and no repository (see omarchy-mac-pkgs omarchy-macos-vm/BUILD.md)" 75
   fi
   for package in "${packages[@]}"; do
     is_installed "$package" || missing+=("$package")
