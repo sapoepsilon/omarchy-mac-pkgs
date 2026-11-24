@@ -1,4 +1,4 @@
 # The Omarchy runtime CI tests the packages against: a repository and a full commit.
-# Move it deliberately, like a recipe pin. Today upstream quattro at the merge of
-# omacom/omarchy#14675, the fingerprint-readers detector.
-omacom/omarchy 81fd2d23ca6e3462183a4dc8360de3113fa8d80c
+# Move it deliberately, like a recipe pin. Today upstream quattro at 94a8c3c3 (#19957),
+# whose edge pacman templates end at [alarm], as the platform fixtures do.
+omacom/omarchy 94a8c3c3321129fae87a329947711355897e69fd
