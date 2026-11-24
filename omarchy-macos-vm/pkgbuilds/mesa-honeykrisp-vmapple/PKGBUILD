@@ -8,7 +8,7 @@
 
 pkgname=mesa-honeykrisp-vmapple
 pkgver=26.2.6
-pkgrel=1
+pkgrel=2
 pkgdesc="Patched Honeykrisp Vulkan driver for omvm's macOS guest GPU (private prefix)"
 arch=('aarch64')
 url="https://github.com/sapoepsilon/omvm"
@@ -17,7 +17,9 @@ depends=(libdrm libelf llvm-libs zstd expat wayland libxshmfence spirv-tools)
 makedepends=(git meson ninja python-mako python-yaml python-packaging glslang clang llvm
              wayland-protocols libclc spirv-llvm-translator)
 options=('!lto')
-source=("mesa::git+https://gitlab.freedesktop.org/mesa/mesa.git#tag=mesa-$pkgver"
+# Tag mesa-26.2.6 (tag object 66b63490), pinned to the commit it names.
+_mesa_commit=8e87a503ebd91408c88596d1b9eeb5f4c0b2088d
+source=("mesa::git+https://gitlab.freedesktop.org/mesa/mesa.git#commit=$_mesa_commit"
         honeykrisp-vmapple.patch)
 sha256sums=('SKIP'
             '866cba2fd923c89fe3b295222d279c37e4944c6390b03ac7ee32acaaa1a31b2a')
@@ -27,8 +29,10 @@ prepare() {
   git -C mesa apply --index ../honeykrisp-vmapple.patch
 }
 
+# Every dependency comes from the system; a wrap fallback fails instead of downloading.
 _setup() {
   meson setup "build-$1" mesa --prefix="$_prefix/$1" --buildtype=release -Db_ndebug=true \
+    --wrap-mode=nodownload \
     -Dvulkan-drivers=asahi -Dgallium-drivers= -Dplatforms="$2" -Dglx=disabled -Degl=disabled \
     -Dgbm=disabled -Dopengl=false -Dgles1=disabled -Dgles2=disabled -Dllvm=enabled \
     -Dvideo-codecs= -Dtools=

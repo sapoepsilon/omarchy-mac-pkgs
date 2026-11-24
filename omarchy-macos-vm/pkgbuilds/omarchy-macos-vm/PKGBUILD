@@ -6,23 +6,24 @@
 
 pkgname=omarchy-macos-vm
 pkgver=0.1.0
-pkgrel=9
+pkgrel=10
 pkgdesc="Omarchy Mac: install the macOS VM stack (omvm) when the installer asked for it"
 arch=('any')
 url="https://github.com/sapoepsilon/omarchy-mac-pkgs/tree/macos-vm/omarchy-macos-vm"
 license=('MIT')
 depends=(bash python systemd pacman jq gum)
+makedepends=(git)
 install=omarchy-macos-vm.install
 # The identity-enabled QEMU that apple-services import brings over links these.
 optdepends=('vte3: apple-services QEMU' 'virglrenderer: apple-services QEMU'
             'libcacard: apple-services QEMU' 'usbredir: apple-services QEMU')
-# Local builds: makepkg -p from this directory takes the package from the
-# checkout two levels up (OMARCHY_MACOS_VM_SRC overrides).
-source=()
-sha256sums=()
+# omarchy-mac-pkgs 1d52a266 holds every file this package installs. A commit cannot
+# name itself, so the pin trails this recipe by one commit; OMARCHY_MAC_PKGS_GIT may
+# point makepkg at another clone, which must hold the same commit.
+_commit=1d52a26604ec156e754f95b9e5fbd588e41321cc
+source=("omarchy-mac-pkgs::${OMARCHY_MAC_PKGS_GIT:-git+https://github.com/sapoepsilon/omarchy-mac-pkgs.git}#commit=$_commit")
+sha256sums=('SKIP')
 
 package() {
-  local src=${OMARCHY_MACOS_VM_SRC:-$startdir/../..}
-  [[ -x $src/install ]] || { echo "no omarchy-macos-vm checkout at $src" >&2; return 1; }
-  "$src/install" "$pkgdir"
+  "$srcdir/omarchy-mac-pkgs/omarchy-macos-vm/install" "$pkgdir"
 }

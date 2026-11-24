@@ -1,9 +1,12 @@
 # omvm for omarchy-mac-pkgs macos-vm: the owner's packaging/aur/PKGBUILD
-# (omvm branch omarchy/must-fix), built from the macos-vm branch, which finds
-# qemu-vmapple and mesa-honeykrisp-vmapple. Named omvm; provides omvm-git.
+# (omvm branch omarchy/must-fix), built from omvm c633dde5 (macos-vm plus the
+# basic-tier profile), which finds qemu-vmapple and mesa-honeykrisp-vmapple. Named omvm; provides omvm-git.
 # Maintainer: Izzy Mansurov <47342870+sapoepsilon@users.noreply.github.com>
 pkgname=omvm
-pkgver=0.1.0
+_commit=c633dde5966f6e05cb0056ab12e67786c4ab7127
+# 0.1.0.r<commits up to _commit>.<its 7-character hash>, counted once on a full
+# clone: a shallow mirror or core.abbrev must not change the version.
+pkgver=0.1.0.r200.c633dde
 pkgrel=1
 pkgdesc="Run macOS guest VMs under KVM on Omarchy (Apple Silicon M1/M2); ships no Apple software"
 # The guests run under KVM on the host's own Apple Silicon CPU, so aarch64 only
@@ -43,14 +46,28 @@ provides=('omvm-git')
 conflicts=('omvm-git')
 backup=('etc/libvirt/hooks/qemu.d/50-omvm')
 install=omvm.install
-# The owner's omvm macos-vm branch (on omarchy/must-fix). Until it is pushed,
+# omvm c633dde5 (basic-tier VM profile, on top of macos-vm 947787d5). Until it is pushed,
 # point OMVM_GIT at a local clone, e.g. git+file://$HOME/Work/omarchy-macos-vm-build/omvm
-source=("$pkgname::${OMVM_GIT:-git+$url.git}#branch=macos-vm")
+source=("$pkgname::${OMVM_GIT:-git+$url.git}#commit=$_commit")
 sha256sums=('SKIP')
 
-pkgver() {
+# pkgver names _commit, so the checkout must be exactly that commit, and on a
+# full clone its history must hold as many commits as pkgver says.
+prepare() {
   cd "$pkgname"
-  printf "0.1.0.r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  local head count
+  head=$(git rev-parse HEAD)
+  if [[ $head != $_commit || $pkgver != *.${_commit:0:7} ]]; then
+    error "omvm checkout $head does not match _commit $_commit and pkgver $pkgver"
+    return 1
+  fi
+  if [[ $(git rev-parse --is-shallow-repository) == "false" ]]; then
+    count=$(git rev-list --count HEAD)
+    if [[ $pkgver != 0.1.0.r$count.* ]]; then
+      error "pkgver $pkgver does not count the $count commits up to $_commit"
+      return 1
+    fi
+  fi
 }
 
 package() {

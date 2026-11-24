@@ -9,7 +9,7 @@
 
 pkgname=qemu-vmapple
 pkgver=10.1.50.r1b41f5f5
-pkgrel=3
+pkgrel=4
 pkgdesc="QEMU vmapple machine on KVM with the reims-vgpu GPU, for omvm's macOS guests"
 arch=('aarch64')
 url="https://github.com/sapoepsilon/omvm"
@@ -22,36 +22,57 @@ _qemu_commit=1b41f5f5db4d1067d023973b9bd74c7b341e0d28
 _reims_commit=1fe0acb68b287db36f1e6c7b9f45383940b8a76f
 _m2v_commit=219f01365dc4c8eb346816c405b5b17403793764
 # The omvm commit whose patches/ this build applies (bump with omvm).
-_omvm_commit=e75eff0074e4c1937530d65d2b948fda965d0b95
+_omvm_commit=c633dde5966f6e05cb0056ab12e67786c4ab7127
+# The meson wraps configure resolves, at their revisions in qemu's subprojects/*.wrap.
+_keycodemapdb_commit=f5772a62ec52591ff6870b7e8ef32482371f22c6
+_softfloat_commit=b64af41c3276f97f0e181920400ee056b9c88037
+_testfloat_commit=e7af9751d9f9fd3b47911f51a5cfd08af256a9ab
 source=("qemu::git+https://github.com/steelbrain/qemu-reims-vgpu.git#commit=$_qemu_commit"
         "reims::git+https://github.com/steelbrain/reims-vgpu.git#commit=$_reims_commit"
         "metal2vulkan::git+https://github.com/steelbrain/metal2vulkan.git#commit=$_m2v_commit"
-        "omvm-patches::git+https://github.com/sapoepsilon/omvm.git#commit=$_omvm_commit")
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+        "omvm-patches::git+https://github.com/sapoepsilon/omvm.git#commit=$_omvm_commit"
+        "keycodemapdb::git+https://gitlab.com/qemu-project/keycodemapdb.git#commit=$_keycodemapdb_commit"
+        "berkeley-softfloat-3::git+https://gitlab.com/qemu-project/berkeley-softfloat-3.git#commit=$_softfloat_commit"
+        "berkeley-testfloat-3::git+https://gitlab.com/qemu-project/berkeley-testfloat-3.git#commit=$_testfloat_commit")
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 _prefix=/usr/lib/qemu-vmapple
 
 prepare() {
   local patches=$srcdir/omvm-patches/patches
-  git -C reims -c user.name=makepkg -c user.email=makepkg@localhost am -q "$patches"/graphics/reims-vgpu/*.patch
-  git -C metal2vulkan -c user.name=makepkg -c user.email=makepkg@localhost am -q "$patches"/graphics/metal2vulkan/*.patch
-  git -C qemu -c user.name=makepkg -c user.email=makepkg@localhost am -q "$patches"/graphics/qemu/*.patch "$patches"/usb/*.patch
+  # Each patch commit takes its patch's date and a fixed committer, so the
+  # patched heads hash the same on every build.
+  local -x GIT_COMMITTER_NAME=makepkg GIT_COMMITTER_EMAIL=makepkg@localhost
+  git -C reims -c user.name=makepkg -c user.email=makepkg@localhost am -q --committer-date-is-author-date "$patches"/graphics/reims-vgpu/*.patch
+  git -C metal2vulkan -c user.name=makepkg -c user.email=makepkg@localhost am -q --committer-date-is-author-date "$patches"/graphics/metal2vulkan/*.patch
+  git -C qemu -c user.name=makepkg -c user.email=makepkg@localhost am -q --committer-date-is-author-date "$patches"/graphics/qemu/*.patch "$patches"/usb/*.patch
+  # The pinned wraps go where meson looks first, with the patch_directory overlay meson
+  # would have copied. configure's --disable-download (meson --wrap-mode=nodownload,
+  # no PyPI) then fails on any wrap not placed here.
+  local wrap
+  for wrap in keycodemapdb berkeley-softfloat-3 berkeley-testfloat-3; do
+    cp -a "$wrap" "qemu/subprojects/$wrap"
+    [[ ! -d qemu/subprojects/packagefiles/$wrap ]] || cp -a "qemu/subprojects/packagefiles/$wrap/." "qemu/subprojects/$wrap/"
+  done
   # reims-vgpu pins its own toolchain (rust-toolchain.toml); fetch it and the crates now.
   (cd reims && rustup show active-toolchain >/dev/null && cargo fetch --locked)
 }
 
 build() {
-  # LSE atomics: reims-vgpu needs target-cpu=native on aarch64 Linux (docs/graphics.md).
-  # makepkg.conf's RUSTFLAGS would override the target-specific variable, so extend it.
-  (cd reims && RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=native" cargo xtask dist --out "$srcdir/reims-dist")
+  # reims-vgpu's inline ldsetal/ldapr need LSE and RCpc. apple-m1, the M1/M2 floor,
+  # has both (native on the M1 Max builder). Appended to makepkg.conf's RUSTFLAGS,
+  # which would override a target-specific variable.
+  (cd reims && RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=apple-m1" cargo xtask dist --out "$srcdir/reims-dist")
   # Optional features meson would pick up from whatever the build host has
   # installed (vte3, virglrenderer, libcacard, usbredir) are off: omvm uses none,
   # and a binary linked to them does not start on a host without them.
   mkdir -p qemu/build
   cd qemu/build
+  # A fixed --with-pkgversion keeps `git describe` of the patched head out of --version.
   PKG_CONFIG_PATH="$srcdir/reims-dist/lib/pkgconfig" ../configure \
     --target-list=aarch64-softmmu --enable-kvm --enable-pvg --enable-gnutls --enable-vnc \
     --disable-vte --disable-virglrenderer --disable-smartcard --disable-usb-redir \
-    --disable-docs --disable-werror --extra-ldflags="-Wl,-rpath,$_prefix/lib"
+    --disable-docs --disable-werror --disable-download --with-pkgversion="$pkgname $pkgver-$pkgrel" \
+    --extra-ldflags="-Wl,-rpath,$_prefix/lib"
   # No target: qemu-system-aarch64 alone skips pc-bios/keymaps, and QEMU then refuses to start.
   ninja
 }
