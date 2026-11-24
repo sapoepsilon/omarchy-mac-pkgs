@@ -20,6 +20,12 @@ rm "$SUDO_TEST_ROOT/bin/omarchy-update-boot"
 for command in omarchy-update-boot omarchy-lifecycle-dispatch omarchy-hw-platform; do
   ln -sfn "$ROOT/bin/$command" "$SUDO_TEST_ROOT/bin/$command"
 done
+# Runtimes whose update marks first-update done call omarchy-done; stub it as
+# upstream's own update tests do, so the mark never reaches the tester's home.
+ln -sfn test-step "$SUDO_TEST_ROOT/bin/omarchy-done"
+# The boundary stubs cp for its channel tests; the update never calls it, while
+# the fixture Mac and the boot check copy files with it, so they get the real one.
+rm -f "$SUDO_TEST_ROOT/bin/cp"
 export OMARCHY_UPDATE_LOGGED=1
 
 tmp=$boundary_tmp/mac-update

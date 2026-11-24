@@ -213,6 +213,7 @@ source "$tmp/functions"
 {
   PROVISIONING_DIR=/var/lib/omarchy/provisioning
   TOP_MNT=$top
+  ESP_MNT=$tmp/esp
   NEXT_NAME=@omarchy-reset-next
   LOG_FILE=$tmp/reset.log
   DISPATCH=$OMARCHY_PATH/bin/omarchy-lifecycle-dispatch
@@ -273,6 +274,7 @@ echo "limine-update" >>"$calls"
 root=\$(cd "\$(dirname "\$0")/../.." && pwd)
 mkdir -p "\$root/boot/EFI/Linux"
 printf 'uki with %s' "\$(cat "\$root/etc/omarchy/provisioning.key" 2>/dev/null)" >"\$root/boot/EFI/Linux/omarchy_linux.efi"
+printf '/+Omarchy\ncomment: machine-id=%s\n' "\$(cat "\$root/etc/machine-id")" >>"\$root/boot/limine.conf"
 printf '  path: boot():/EFI/Linux/omarchy_linux.efi#%s\n' "\$(b2sum "\$root/boot/EFI/Linux/omarchy_linux.efi" | cut -d' ' -f1)" >>"\$root/boot/limine.conf"
 SH
   chmod +x "$factory/usr/bin/limine-update"

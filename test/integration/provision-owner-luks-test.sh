@@ -214,6 +214,8 @@ install_authorized_keys() { :; }
 configure_login() { :; }
 configure_hostname() { :; }
 configure_timezone() { :; }
+configure_language() { :; }
+record_eula() { :; }
 finalize_user() { :; }
 limine_entries_stale() { return 1; }
 luks_device() { echo "$tmp/luks-device"; }
