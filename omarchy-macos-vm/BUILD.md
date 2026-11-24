@@ -7,11 +7,11 @@ This branch makes a fresh Omarchy Mac install able to come up as an [omvm](https
 | Path | What |
 | --- | --- |
 | `omarchy-macos-vm/` | New package: the first-boot hook (`omarchy-macos-vm-setup.service`, per-user `omarchy-macos-vm-user.service`). Meets the package contract (`install`, `test/all`, README, LICENSE, version). |
-| `omarchy-macos-vm/pkgbuilds/linux-aurora-vmapple/` | Side kernel from the owner's fork `sapoepsilon/linux-aurora` branch `vmapple/kvm-macos-guest`, pinned to commit `f874ff3f`: linux-aurora integration/aurora `b798f2b` (7.2.11.aurora15, recipe files from omarchy-pkgs `73931c9b`, pinned by commit and sha256) plus four GPL-2.0 KVM commits, aquarat's `ac4f53c7` (MMIO load/store without a syndrome) and `5cff73a4` (Apple PAuth state under VHE), and the owner's `9ee27354` (deferred NISV MMIO writeback, respecting `KVM_CAP_ARM_NISV_TO_USER`) and `f874ff3f` (its `mmio_nisv_wb` selftest fix). The two newest are not on the public fork yet. The private bindgen's source archive (0.73.2) is a sha256-pinned source too. Own pkgbase, no `linux-asahi` provide, no headers package, ships `/usr/share/omarchy-mac-boot/side-kernels.d/linux-aurora-vmapple`. Version 7.2.11.aurora15vmapple-2: the same name as the -1 build the laptop runs, so pacman upgrades it in place, and the new pkgrel makes the kernel release `7.2.11-15vmapple-2-ARCH`, which omvm `c633dde5`'s Apple-services provider check (`share/apple-helpers.py`) does not accept yet; the basic tier does not use it. It gets its own UKI and Limine entry beside stock `linux-aurora`; with the macOS VM stack enabled the hook makes it the persistent default (`omarchy-macos-vm-boot-default enable`, recorded in `/etc/omarchy-mac-boot/default-side-kernel` and kept across kernel updates) and keeps stock `linux-aurora` selectable for recovery; `omarchy-macos-vm remove` restores the stock default. |
+| `omarchy-macos-vm/pkgbuilds/linux-aurora-vmapple/` | Side kernel from the owner's fork `sapoepsilon/linux-aurora`, pinned to commit `f874ff3f`, the tip of its public branch `codex/oma5-nisv-writeback` (the recipe's `url` still names `vmapple/kvm-macos-guest`, which ends at `5cff73a4` and lacks the two newest commits): linux-aurora integration/aurora `b798f2b` (7.2.11.aurora15, recipe files from omarchy-pkgs `73931c9b`, pinned by commit and sha256) plus four GPL-2.0 KVM commits, aquarat's `ac4f53c7` (MMIO load/store without a syndrome) and `5cff73a4` (Apple PAuth state under VHE), and the owner's `9ee27354` (deferred NISV MMIO writeback, respecting `KVM_CAP_ARM_NISV_TO_USER`) and `f874ff3f` (its `mmio_nisv_wb` selftest fix). The private bindgen's source archive (0.73.2) is a sha256-pinned source too. Own pkgbase, no `linux-asahi` provide, no headers package, ships `/usr/share/omarchy-mac-boot/side-kernels.d/linux-aurora-vmapple`. Version 7.2.11.aurora15vmapple-2: the same name as the -1 build the laptop runs, so pacman upgrades it in place, and the new pkgrel makes the kernel release `7.2.11-15vmapple-2-ARCH`, which omvm `c633dde5`'s Apple-services provider check does not accept yet (`share/apple-helpers.py:122` requires exactly `7.2.11-15vmapple-1-ARCH`); the basic tier does not use it. It gets its own UKI and Limine entry beside stock `linux-aurora`; with the macOS VM stack enabled the hook makes it the persistent default (`omarchy-macos-vm-boot-default enable`, recorded in `/etc/omarchy-mac-boot/default-side-kernel` and kept across kernel updates) and keeps stock `linux-aurora` selectable for recovery; `omarchy-macos-vm remove` restores the stock default. |
 | `omarchy-macos-vm/pkgbuilds/qemu-vmapple/` | steelbrain/qemu-reims-vgpu `1b41f5f5` + omvm's qemu 0001-0007 and usb 0001, taken from omvm `c633dde5` (`patches/` is unchanged since `e75eff0`), the same eight commits as the laptop's `qemu-fairplay-dev/src` branch `sb-kvm-bdif-write` (`760d1d0d`); the uncommitted FairPlay/identity work there and the `qemu-ofr2` lab build the VMs use now are left out, linked to reims-vgpu `1fe0acb6` + metal2vulkan `219f0136` with omvm's patches, in `/usr/lib/qemu-vmapple`. `git am --committer-date-is-author-date` with a fixed committer gives the patched trees the same heads on every build. The three meson wraps configure resolves (keycodemapdb, berkeley-softfloat-3, berkeley-testfloat-3) are sources pinned to the revisions in qemu's `subprojects/*.wrap`, and `--disable-download` fails on any other. reims-vgpu is built with `-C target-cpu=apple-m1`, the M1/M2 floor, which has the LSE and RCpc its inline assembly needs, instead of the build host's `native`. `--with-pkgversion` fixes the version string to `qemu-vmapple 10.1.50.r1b41f5f5-4`, so `git describe` of the patched head stays out of it. |
 | `omarchy-macos-vm/pkgbuilds/mesa-honeykrisp-vmapple/` | Mesa 26.2.6, pinned to commit `8e87a503` (what tag `mesa-26.2.6` names), built with `--wrap-mode=nodownload` so every dependency comes from the system, + `honeykrisp-vmapple.patch`, the exact diff of the laptop's `~/src/mesa-honeykrisp-sb` (aquarat's two 16-bit varying fixes + omvm's interlock patch; `asahi/16-bit-varyings` is the same two fixes on Mesa main, for the MR), two ICDs (`headless/`, `wayland/`) in `/usr/lib/mesa-honeykrisp-vmapple`, never in `/usr/share/vulkan/icd.d`. |
-| `omarchy-macos-vm/pkgbuilds/omvm/` | The owner's `packaging/aur/PKGBUILD` from omvm `omarchy/must-fix`, built from omvm commit `c633dde5` (`macos-vm` `947787d5` plus four commits ending in the basic-tier VM profile, OMA-7; not on sapoepsilon/omvm yet): it finds the two packages above, adds `omvm prepare`, ships the udmabuf tmpfiles.d, lets `omvm ingest` use the read-only VMXFER mount the vmxfer service holds (no sudo), hands upstream's headless launchers (`omvm setup`, `run`, `start`) the packaged QEMU, and (`22abc8d`) logs the guest account in automatically with the password in `guest-password`, skipping the post-login Setup Assistant panes. The version is static, `0.1.0.r200.c633dde` (commits up to `c633dde5` and its 7-character hash, counted once on a full clone), and prepare() fails unless the checkout is that commit. `OMVM_GIT` can point makepkg at another clone of the same commit. |
-| omarchy-mac `macos-vm` | `omarchy-macos-vm install\|remove\|status` and the Install/Remove > macOS menu rows beside Windows run the same service on a running system. |
+| `omarchy-macos-vm/pkgbuilds/omvm/` | The owner's `packaging/aur/PKGBUILD` from omvm `omarchy/must-fix`, built from omvm commit `c633dde5` (`macos-vm` `947787d5` plus four commits ending in the basic-tier VM profile, OMA-7; the tip of sapoepsilon/omvm's public branch `codex/oma7-basic-tier`, not on `main`): it finds the two packages above, adds `omvm prepare`, ships the udmabuf tmpfiles.d, lets `omvm ingest` use the read-only VMXFER mount the vmxfer service holds (no sudo), hands upstream's headless launchers (`omvm setup`, `run`, `start`) the packaged QEMU, and (`22abc8d`) logs the guest account in automatically with the password in `guest-password`, skipping the post-login Setup Assistant panes. The version is static, `0.1.0.r200.c633dde` (commits up to `c633dde5` and its 7-character hash, counted once on a full clone), and prepare() fails unless the checkout is that commit. `OMVM_GIT` can point makepkg at another clone of the same commit. |
+| Desktop runtime `5b87312d` | The omacom/omarchy runtime the stack is matched with: two commits on quattro `94a8c3c3` (the Install/Remove > macOS menu rows beside Windows, which run `omarchy-macos-vm install`/`remove`, and the Apple Silicon hardware install leaf), on the owner's fork `sapoepsilon/omarchy-mac` branch `codex/oma11-basic-vm-menu`. There is no `sapoepsilon/omarchy`. |
 | `omarchy-macos-vm/pkgbuilds/omarchy-macos-vm/` | The hook package, built from omarchy-mac-pkgs commit `1d52a266`, which holds every file it installs. A commit cannot name its own hash, so the pin trails the recipe by one commit and moves whenever the hook's files change. `OMARCHY_MAC_PKGS_GIT` can point makepkg at another clone of the same commit. |
 | `omarchy-mac-boot/` | (1) Merges `m1n1-multiple-kernels` (m1n1's device trees come from linux-aurora's tree, not the newest one) and `fix/limine-cmdline-append`. (2) The boot check knows **side kernels**: a kernel package that declares itself in `/usr/share/omarchy-mac-boot/side-kernels.d/` may be running (checked as a pending reboot of the Apple kernel) or first in the Limine menu (its UKI must exist and the Apple kernel's entry must still be there; that entry is what gets checked). Undeclared second kernels fail as before. (3) First boot reads `macos_vm=1` from `install.conf` and writes `/etc/omarchy/macos-vm.enabled`, with the installer's macOS account from `omarchy/macos-vm-credentials` (then 0600; the ESP file is deleted). |
 
@@ -26,10 +26,10 @@ Why the boot check needed it: with a second kernel installed, `update-m1n1` buil
 
 What the image (item d) must do to bake a payload with the stack:
 
-1. Build the image with this branch's `omarchy-mac-boot` (the `platform_sources` mechanism in omarchy-mac-installer's image-builder takes `omarchy-mac-boot` from a commit of a platform repository; point it at `sapoepsilon/omarchy-mac-pkgs` `macos-vm`, or rebuild the package from it).
+1. Beside the five packages here, the payload's runtime inputs are `omarchy-mac-boot` and `omarchy-mac` built from boot final `8750b164` (`sapoepsilon/omarchy-mac-pkgs` branch `codex/oma6-basic-vm-boot`) and `omarchy` and `omarchy-settings` built from the desktop runtime `5b87312d`. That `omarchy-mac-boot` keeps the boot order the hook's persistent default writes across kernel updates and `limine.conf` rebuilds (`omarchy-mac-limine-boot-order`, OMA-6), which older boot packages do not, so never pair this hook with older boot or runtime packages. The `platform_sources` mechanism in omarchy-mac-installer's image-builder takes them from those commits.
 2. Install `omarchy-macos-vm` into `@` before the `@factory` seal and apply its preset (`80-omarchy-macos-vm.preset`), the way `--lab-access` writes its overlay. It is harmless without the marker.
-3. Put the four stack packages in `/var/lib/omarchy/macos-vm/repo/` in `@` (or have the installer copy them to `omarchy/macos-vm/repo/` on the ESP). Without them the service looks in the configured repositories and fails, retrying every boot.
-4. Such an image carries packages no Omarchy key signed, so the public inspection and `mac-release-guard` refuse it by design: build it with a private/lab profile.
+3. Put the four stack packages in `/var/lib/omarchy/macos-vm/repo/` in `@` and their signatures in `/var/lib/omarchy/macos-vm/signatures/`, the copy the developer image's verifier checks (see below). Without them the service looks in the configured repositories and fails, retrying every boot.
+4. Such an image carries packages no Omarchy key signed, so the public inspection and `mac-release-guard` refuse it by design. The developer-only signed path below is the only way to build it.
 
 ## Build in a clean chroot (aarch64)
 
@@ -60,34 +60,42 @@ Then `repo-add /build/repo/omarchy-macos-vm.db.tar.zst /build/repo/*.pkg.tar.zst
 
 ### Commits not on the public remotes yet
 
-`sapoepsilon/linux-aurora` `f874ff3f`, `sapoepsilon/omvm` `c633dde5` and `sapoepsilon/omarchy-mac-pkgs` `1d52a266` are not pushed yet, so the builder gets them as bundles seeded into SRCDEST. makepkg keeps each git source as a bare clone in `$SRCDEST/<name>`, refuses one whose `remote.origin.url` is not the PKGBUILD's URL, runs `git fetch --all -p` in it, and checks it out through `git clone -s`, which carries only branches and tags. So the commit goes under a tag, and the fetch refspec is narrowed to branches so the prune cannot drop it. The names are `linux` (the kernel), `omvm` (omvm), `omvm-patches` (qemu-vmapple) and `omarchy-mac-pkgs` (the hook).
+The kernel `f874ff3f` and omvm `c633dde5` (also qemu-vmapple's `omvm-patches`) are on the public branches named above, as is the desktop runtime `5b87312d`, so makepkg fetches them from the recipes' default URLs. A bundle is needed only for a commit that is not published yet: today the hook's pin, this repository's `1d52a266`, which is not pushed (its parent `8750b164` is, on `codex/oma6-basic-vm-boot`). makepkg keeps each git source as a bare clone in `$SRCDEST/<name>`, refuses one whose `remote.origin.url` is not the PKGBUILD's URL, runs `git fetch --all -p` in it, and checks it out through `git clone -s`, which carries only branches and tags. So the commit goes under a tag, and the fetch refspec is narrowed to branches so the prune cannot drop it. The hook's source name is `omarchy-mac-pkgs`.
 
 ```bash
-# Where the commit exists, against a base the builder's clone already has:
-git bundle create omvm-c633dde.bundle 947787d58f55bcf813b1f2863a2a070b8bcd6830..oma-7-basic-tier-reconcile
-# On the builder, for each source name that needs it (here omvm; the same for omvm-patches):
-git clone --mirror https://github.com/sapoepsilon/omvm.git "$SRCDEST/omvm"   # or a local mirror
-G="git -C $SRCDEST/omvm"
-$G remote set-url origin https://github.com/sapoepsilon/omvm.git
+# Where the commit exists, against the published 8750b164:
+git tag pin/1d52a266 1d52a26604ec156e754f95b9e5fbd588e41321cc
+git bundle create omarchy-mac-pkgs-1d52a266.bundle 8750b164b076c391ac657aa084beec3e3d8fd84e..pin/1d52a266
+# On the builder:
+git clone --mirror https://github.com/sapoepsilon/omarchy-mac-pkgs.git "$SRCDEST/omarchy-mac-pkgs"   # or a local mirror
+G="git -C $SRCDEST/omarchy-mac-pkgs"
+$G remote set-url origin https://github.com/sapoepsilon/omarchy-mac-pkgs.git
 $G config --unset remote.origin.mirror
 $G config --replace-all remote.origin.fetch '+refs/heads/*:refs/heads/*'
-$G fetch "$PWD/omvm-c633dde.bundle" 'refs/heads/oma-7-basic-tier-reconcile:refs/tags/pin/c633dde5'
-$G cat-file -e 'c633dde5966f6e05cb0056ab12e67786c4ab7127^{commit}'
+$G fetch "$PWD/omarchy-mac-pkgs-1d52a266.bundle" 'refs/tags/pin/1d52a266:refs/tags/pin/1d52a266'
+$G cat-file -e '1d52a26604ec156e754f95b9e5fbd588e41321cc^{commit}'
 ```
 
-A shallow clone works as long as it holds the bundle's prerequisite commit (for the kernel, `5cff73a4`). The other sources can come from local mirrors the same way: clone one into `$SRCDEST/<name>` and set `remote.origin.url` back to the PKGBUILD's URL. `OMVM_GIT` and `OMARCHY_MAC_PKGS_GIT` change only the URL; the `#commit=` pin stays.
+A shallow clone works as long as it holds the bundle's prerequisite commit, `8750b164`. The other sources can come from local mirrors the same way: clone one into `$SRCDEST/<name>` and set `remote.origin.url` back to the PKGBUILD's URL. `OMVM_GIT` and `OMARCHY_MAC_PKGS_GIT` change only the URL; the `#commit=` pin stays.
 
 ## Hosting the packages
 
-- **Local repo on the laptop** (for updates): add to `/etc/pacman.conf`:
+The packages and their repository database are signed by a developer-only key, never by the Omarchy key: detached signatures (`<archive>.sig`, and `omarchy-macos-vm.db.sig` beside the database, as `repo-add --sign` names it) by `FDBEEC154C82FDF0F6E1B2BED912D095848C2F1C`, whose UID reads `Omarchy VM Beta developer signer (DEVELOPER-ONLY, not for public release)`. Its public key is `omarchy-vm-beta-dev-signing.pub.asc`, sha256 `73f24636f1ca86b16be9a306f7061fcb705c6a05798449e3dc86f7e7cbfe4f9a`. The owner signs on their Mac; keys never go to the build host. Nothing is signed yet. This is not OMA12 or public acceptance: the public inspection and `mac-release-guard` still refuse an image carrying these packages or this key.
+
+- **Local repo on a developer laptop** (for updates): trust the key on that machine explicitly and require signatures from the repository.
+  ```
+  sudo pacman-key --add omarchy-vm-beta-dev-signing.pub.asc
+  sudo pacman-key --lsign-key FDBEEC154C82FDF0F6E1B2BED912D095848C2F1C
+  ```
+  Then add to `/etc/pacman.conf`:
   ```
   [omarchy-macos-vm]
-  SigLevel = Optional TrustAll
+  SigLevel = Required
   Server = file:///home/<user>/omarchy-macos-vm-repo/$arch
   ```
-  then `sudo pacman -Sy`. Rebuild and `repo-add` again to update.
-- **In the payload**: copy `$PKGDEST/*.pkg.tar.zst` to `/var/lib/omarchy/macos-vm/repo/` in the image root, or to `omarchy/macos-vm/repo/` on the ESP. The setup service takes the newest archive of each package from there with `pacman -U`.
-- **Over the tailnet**: serve `$PKGDEST` over HTTPS and put `"repo":"https://.../aarch64"` in the marker.
+  and run `sudo pacman -Sy`. pacman's keyring is not scoped to a repository, so the local signature trusts the key wherever pacman checks signatures: do this only on a developer machine, and `sudo pacman-key --delete FDBEEC154C82FDF0F6E1B2BED912D095848C2F1C` takes it back. To update, rebuild, `repo-add` again and have the owner sign the new archives and database.
+- **In the payload** (a developer image): omarchy-mac-installer's image-builder, given the developer trust (`build-mac-image --developer-trust DIR --macos-vm`; not merged or published yet), stages the four archives and the database in `/var/lib/omarchy/macos-vm/repo/` in `@` and their signatures in `/var/lib/omarchy/macos-vm/signatures/`, and seals the developer public key, its policy and the signed manifest in `/usr/lib/omarchy/developer-trust/`, never in the image's pacman keyring. The drop-in `/etc/systemd/system/omarchy-macos-vm-setup.service.d/50-omarchy-developer-verify.conf` runs `verify-macos-vm` as `ExecStartPre`: gpgv checks the manifest, every staged archive and the database against the sealed key alone, and a bad, missing or foreign signature fails the unit before the setup's `pacman -U`, with no unsigned fallback. It is tested against signed fixtures, not yet on a booted image.
+- **Over the tailnet**: a marker `"repo":"https://.../aarch64"` makes the setup add `[omarchy-macos-vm]` with `SigLevel = Optional TrustAll` (`add_repository` in `omarchy-macos-vm-setup`), so it is not the signed path, and the developer image's verifier refuses a marker that names a `repo`.
 
 ## Test
 
@@ -102,7 +110,8 @@ sudo install -Dm644 /dev/null /usr/share/omarchy-mac-boot/side-kernels.d/linux-a
 sudo OMARCHY_BOOT_CHECK_ALLOW_PENDING_REBOOT=1 bash omarchy-mac-boot/bin/omarchy-apple-silicon-boot-check --boot-chain
 # The packages:
 sudo pacman -U "$PKGDEST"/{qemu-vmapple,mesa-honeykrisp-vmapple,omvm,linux-aurora-vmapple}-*.pkg.tar.zst
-ldd /usr/lib/qemu-vmapple/qemu-system-aarch64 | grep reims
+/usr/lib/qemu-vmapple/qemu-system-aarch64 --version          # ... (qemu-vmapple 10.1.50.r1b41f5f5-4)
+/usr/lib/qemu-vmapple/qemu-system-aarch64 -device help | grep apple-gfx-pci
 OMVM_QEMU=/usr/lib/qemu-vmapple/qemu-system-aarch64 /usr/bin/omvm doctor
 # The hook, by hand (as first boot would after macos_vm=1):
 sudo pacman -U "$PKGDEST"/omarchy-macos-vm-*.pkg.tar.zst
@@ -114,7 +123,7 @@ grep -n 'linux-aurora' /boot/efi/limine.conf     # linux-aurora-vmapple first (t
 cat /etc/omarchy-mac-boot/default-side-kernel    # linux-aurora-vmapple
 ```
 
-`~/.local/bin/omvm` (the owner's checkout) comes before `/usr/bin/omvm` on `PATH`; call `/usr/bin/omvm` to test the package. Then reboot: Limine starts "linux-aurora-vmapple" by default from now on, and stock "linux-aurora" stays in the menu for recovery. Check `omvm doctor` reports the patched kernel and `omvm start macos` boots the existing VM on the packaged QEMU. `omarchy-macos-vm remove` puts stock `linux-aurora` back as the default. The end-to-end test is a fresh install with the box ticked (items c and d).
+reims-vgpu is linked statically into `qemu-system-aarch64` (about 21,000 reims symbols, no `NEEDED` entry), so `ldd` never lists it, and the `lib/libreims_vgpu.so` the package also ships is not loaded; `apple-gfx-pci` is the display device it backs, which upstream QEMU builds only on macOS hosts. `~/.local/bin/omvm` (the owner's checkout) comes before `/usr/bin/omvm` on `PATH`; call `/usr/bin/omvm` to test the package. Then reboot: Limine starts "linux-aurora-vmapple" by default from now on, and stock "linux-aurora" stays in the menu for recovery. Check `omvm doctor` reports the patched kernel and `omvm start macos` boots the existing VM on the packaged QEMU. `omarchy-macos-vm remove` puts stock `linux-aurora` back as the default. The end-to-end test is a fresh install with the box ticked (items c and d).
 
 ## Licence
 
