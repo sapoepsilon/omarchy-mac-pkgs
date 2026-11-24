@@ -33,13 +33,18 @@ printf '#!/bin/bash\nexit 0\n' >"$stub_bin/grub-mkconfig"
 chmod +x "$stub_bin/omarchy-hw-apple-silicon" "$stub_bin/grub-probe" "$stub_bin/grub-mkconfig"
 ln -s "$ROOT/bin/omarchy-mac-limine-active" "$stub_bin/omarchy-mac-limine-active"
 ln -s "$ROOT/bin/omarchy-mac-limine-cmdline" "$stub_bin/omarchy-mac-limine-cmdline"
+ln -s "$ROOT/bin/omarchy-mac-limine-boot-order" "$stub_bin/omarchy-mac-limine-boot-order"
+ln -s "$ROOT/bin/omarchy-mac-kernel" "$stub_bin/omarchy-mac-kernel"
 
 printf 'GRUB_CMDLINE_LINUX="rd.luks.name=abc=root"\nGRUB_CMDLINE_LINUX_DEFAULT="quiet splash"\n' >"$grub_default"
 printf 'UUID=root-uuid / btrfs subvol=@ 0 0\n' >"$fstab"
 
 run() {
   OMARCHY_LIMINE_GATE="$gate" OMARCHY_LIMINE_DEFAULT="$limine_default" OMARCHY_GRUB_DEFAULT="$grub_default" \
-    OMARCHY_FSTAB="$fstab" PATH="$stub_bin:$PATH" bash "$update"
+    OMARCHY_FSTAB="$fstab" \
+    OMARCHY_MAC_DEFAULT_SIDE_KERNEL="$test_tmp/default-side-kernel" \
+    OMARCHY_MAC_SIDE_KERNELS_DIR="$test_tmp/side-kernels.d" \
+    PATH="$stub_bin:$PATH" bash "$update"
 }
 
 # A GRUB Mac: no gate, no Limine defaults.
@@ -86,3 +91,20 @@ pass "a Mac with no GRUB needs none"
 FAIL_limine_update=1 run && fail "a failed limine-update fails the boot update"
 ! grep -q omarchy-mac-limine-deploy "$calls" || fail "Limine is not deployed after a failed limine-update"
 pass "a failed limine-update stops the boot update"
+
+# Persistent default side kernel: omarchy-mac-boot-update reconciles BOOT_ORDER
+# before limine-update so limine.conf regeneration keeps it first.
+mkdir -p "$test_tmp/side-kernels.d"
+: >"$test_tmp/side-kernels.d/linux-aurora-vmapple"
+printf 'linux-aurora-vmapple\n' >"$test_tmp/default-side-kernel"
+cat >"$stub_bin/pacman" <<'SH'
+#!/bin/bash
+[[ $1 == -Qq ]] && printf 'linux-aurora\nlinux-aurora-vmapple\n'
+SH
+chmod +x "$stub_bin/pacman"
+printf 'ESP_PATH="/boot/efi"\nBOOT_ORDER="linux-aurora, *, *fallback, Snapshots"\nKERNEL_CMDLINE[default]="stale"\n' >"$limine_default"
+: >"$calls"
+run || fail "boot update with default side kernel succeeds"
+grep -Fxq 'BOOT_ORDER="linux-aurora-vmapple, linux-aurora, *, *fallback, Snapshots"' "$limine_default" ||
+  fail "omarchy-mac-boot-update keeps linux-aurora-vmapple first in BOOT_ORDER with stock linux-aurora second" "$(cat "$limine_default")"
+pass "omarchy-mac-boot-update preserves persistent default side-kernel BOOT_ORDER across regeneration"

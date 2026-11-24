@@ -45,6 +45,13 @@ stub getent 'echo "getent $*" >>"$TEST_CALLS"; [[ -z ${TEST_OFFLINE:-} ]]'
 stub curl 'printf 404'
 stub users 'echo "users $*" >>"$TEST_CALLS"'
 stub credentials 'echo "credentials $*" >>"$TEST_CALLS"'
+stub boot-default 'echo "boot-default $*" >>"$TEST_CALLS"
+if [[ $1 == enable ]]; then
+  mkdir -p "$OMARCHY_ESP/EFI/Linux" "$OMARCHY_MACOS_VM_ROOT/etc/omarchy-mac-boot"
+  printf "linux-aurora-vmapple\n" >"$OMARCHY_MACOS_VM_ROOT/etc/omarchy-mac-boot/default-side-kernel"
+  printf "default_entry: 2\n/+Omarchy\n  //linux-aurora-vmapple\n  //linux-aurora\n" >"$OMARCHY_ESP/limine.conf"
+  echo uki >"$OMARCHY_ESP/EFI/Linux/omarchy_linux-aurora-vmapple.efi"
+fi'
 stub omarchy-apple-silicon-boot-check 'echo "boot-check $* pending=$OMARCHY_BOOT_CHECK_ALLOW_PENDING_REBOOT" >>"$TEST_CALLS"; [[ -z ${TEST_BOOT_CHECK_FAIL:-} ]]'
 
 new_root() {
@@ -64,7 +71,8 @@ add_archives() {
 run_setup() {
   set +e
   env -u HOME OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_ESP="$root/boot/efi" OMARCHY_MACOS_VM_SKIP_HW=1 \
-    OMARCHY_MACOS_VM_USERS="$stub_bin/users" OMARCHY_MACOS_VM_CREDENTIALS="$stub_bin/credentials" OMARCHY_MACOS_VM_NETWORK_WAIT="${NETWORK_WAIT:-0}" \
+    OMARCHY_MACOS_VM_USERS="$stub_bin/users" OMARCHY_MACOS_VM_CREDENTIALS="$stub_bin/credentials" \
+    OMARCHY_MACOS_VM_BOOT_DEFAULT="$stub_bin/boot-default" OMARCHY_MACOS_VM_NETWORK_WAIT="${NETWORK_WAIT:-0}" \
     TEST_CALLS="$calls" TEST_INSTALLED="$test_tmp/installed" PATH="$stub_bin:$PATH" \
     bash "$setup" >"$test_tmp/out" 2>&1
   status=$?
@@ -88,14 +96,14 @@ sync_line=$(grep -n '^pacman -Sy' "$calls" | cut -d: -f1 | head -1)
 install_line=$(grep -n '^pacman -U' "$calls" | cut -d: -f1 | head -1)
 [[ -n $sync_line ]] && (( sync_line < install_line )) || fail "the sync databases are refreshed before pacman -U" "$(cat "$calls")"
 grep -q '^omvm macos-step home=/' "$calls" || fail "omvm runs with HOME set" "$(cat "$calls")"
-grep -Fxq boot-update "$calls" || fail "a missing side-kernel entry is built"
+grep -Fxq 'boot-default enable' "$calls" || fail "setup enables persistent default boot for linux-aurora-vmapple" "$(cat "$calls")"
 grep -q '^boot-check --boot-chain pending=1' "$calls" || fail "the boot chain is checked"
 grep -q 'systemctl --global enable omarchy-macos-vm-user.service' "$calls" || fail "the user step is enabled"
+! grep -q 'systemctl enable .*oneshot-restore' "$calls" || fail "oneshot-restore is never enabled" "$(cat "$calls")"
 grep -q '^omvm macos-step' "$calls" || fail "the macOS step is staged"
 [[ ! -e $root/etc/libvirt/hooks/qemu ]] || fail "the libvirt hook is left to the omvm package"
 grep -q '^package=omvm' "$root/var/lib/omarchy/macos-vm/done" || fail "the done stamp names the packages" "$(cat "$root/var/lib/omarchy/macos-vm/done")"
 grep -q 'systemctl disable omarchy-macos-vm-setup.service' "$calls" || fail "the service disables itself"
-grep -q 'BOOT_ORDER\|kernel default' "$calls" && fail "the default boot entry is never changed"
 grep -q '^systemctl start --no-block omarchy-macos-vm-vmxfer.service' "$calls" || fail "the setup looks on VMXFER right away" "$(cat "$calls")"
 grep -q '^getent ahosts mirror.example.invalid' "$calls" || fail "the setup checks that the mirror resolves" "$(cat "$calls")"
 grep -Fxq 'users kick' "$calls" || fail "the setup starts the per-user steps in running sessions" "$(cat "$calls")"
@@ -197,17 +205,16 @@ grep -q '^omvm prepare' "$calls" && [[ -s $user_home/.local/state/omarchy-macos-
   fail "the user step prepares omvm" "$(cat "$calls")"
 pass "the user step adds the macOS launcher entry and prepares omvm"
 
-# omarchy-macos-vm-vmxfer: the stamp follows what the macOS step left on VMXFER.
+# omarchy-macos-vm-vmxfer: keeps persistent default enabled and tracks VMXFER.
 vmxfer=$package/bin/omarchy-macos-vm-vmxfer
 xfer=$test_tmp/xfer
 mkdir -p "$xfer"
 stub findmnt 'exit 0'
-stub oneshot 'echo "oneshot $*" >>"$TEST_CALLS"'
 run_vmxfer() {
   : >"$calls"
   set +e
-  env OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_MACOS_VM_VMXFER_DIR="$xfer" PATH="$stub_bin:$PATH" \
-    OMARCHY_MACOS_VM_ONESHOT="$stub_bin/oneshot" OMARCHY_MACOS_VM_USERS="$stub_bin/users" OMARCHY_MACOS_VM_CREDENTIALS="$stub_bin/credentials" TEST_CALLS="$calls" \
+  env OMARCHY_MACOS_VM_ROOT="$root" OMARCHY_ESP="$root/boot/efi" OMARCHY_MACOS_VM_VMXFER_DIR="$xfer" PATH="$stub_bin:$PATH" \
+    OMARCHY_MACOS_VM_BOOT_DEFAULT="$stub_bin/boot-default" OMARCHY_MACOS_VM_USERS="$stub_bin/users" OMARCHY_MACOS_VM_CREDENTIALS="$stub_bin/credentials" TEST_CALLS="$calls" \
     bash "$vmxfer" >"$test_tmp/out" 2>&1
   status=$?
   set -e
@@ -215,15 +222,16 @@ run_vmxfer() {
 new_root vmxfer
 stub lsblk 'printf "/dev/nvme0n1p2 \n/dev/nvme0n1p3 VMXFER\n"'
 run_vmxfer
-(( status == 0 )) && [[ ! -e $root/var/lib/omarchy/macos-vm/vmxfer-ready ]] && ! grep -q oneshot "$calls" ||
-  fail "an empty VMXFER is not ready and arms nothing" "$(cat "$test_tmp/out")"
+(( status == 0 )) && [[ ! -e $root/var/lib/omarchy/macos-vm/vmxfer-ready ]] ||
+  fail "an empty VMXFER is not ready" "$(cat "$test_tmp/out")"
+grep -Fxq 'boot-default enable' "$calls" || fail "every boot ensures persistent default boot stays enabled" "$(cat "$calls")"
 grep -Fxq 'credentials ' "$calls" || fail "every boot retries handing the installer's macOS account over" "$(cat "$calls")"
 : >"$xfer/vmxfer.sha256"; : >"$xfer/tahoe-26.4-25E246-restore.tar.gz"
 run_vmxfer
 grep -q '^device=/dev/nvme0n1p3' "$root/var/lib/omarchy/macos-vm/vmxfer-ready" &&
   grep -Fxq "mount=$xfer" "$root/var/lib/omarchy/macos-vm/vmxfer-ready" ||
   fail "the macOS step's output makes VMXFER ready and names its mount" "$(cat "$test_tmp/out")"
-grep -Fxq 'oneshot arm' "$calls" || fail "a ready VMXFER arms the side kernel's one-time boot" "$(cat "$calls")"
+grep -Fxq 'boot-default enable' "$calls" || fail "a ready VMXFER keeps persistent default enabled" "$(cat "$calls")"
 grep -Fxq 'users kick' "$calls" || fail "a ready VMXFER starts the import in running sessions" "$(cat "$calls")"
 stub lsblk 'printf "/dev/nvme0n1p2 \n"'
 run_vmxfer
@@ -231,13 +239,14 @@ run_vmxfer
 grep -Fq 'ConditionPathExists=/var/lib/omarchy/macos-vm/done' "$package/files/usr/lib/systemd/system/omarchy-macos-vm-vmxfer.service" &&
   grep -Fxq 'enable omarchy-macos-vm-vmxfer.service' "$package/files/usr/lib/systemd/system-preset/80-omarchy-macos-vm.preset" ||
   fail "the VMXFER check runs at boot once the stack is installed"
-pass "omarchy-macos-vm-vmxfer marks VMXFER ready only when the macOS step's VM is on it"
+pass "omarchy-macos-vm-vmxfer keeps persistent default enabled and marks VMXFER ready only when the macOS step's VM is on it"
 
 # omarchy-macos-vm-login: at login, finish the VM in a terminal once it can be.
 login=$package/bin/omarchy-macos-vm-login
 lstate=$test_tmp/lstate
 limages=$test_tmp/limages
 kvm=$test_tmp/kvm-param
+ldefault=$test_tmp/default-side-kernel
 stub omvm 'echo "omvm $*" >>"$TEST_CALLS"; [[ $1 != mode || -n ${TEST_VM:-} ]]'
 stub omarchy-notification-send 'echo "notify $*" >>"$TEST_CALLS"'
 stub omarchy-launch-floating-terminal-with-presentation 'echo "terminal $*" >>"$TEST_CALLS"'
@@ -246,11 +255,12 @@ run_login() {
   set +e
   env -u XDG_STATE_HOME -u XDG_DATA_HOME HOME="$user_home" TEST_CALLS="$calls" PATH="$stub_bin:$PATH" \
     OMARCHY_MACOS_VM_STATE="$lstate" OMVM_IMAGES="$limages" OMARCHY_MACOS_VM_KVM_PARAM="$kvm" \
+    OMARCHY_MAC_DEFAULT_SIDE_KERNEL="$ldefault" \
     OMARCHY_MACOS_VM_NOTIFY_WAIT=0 bash "$login" >"$test_tmp/out" 2>&1
   status=$?
   set -e
 }
-rm -rf "$lstate" "$limages" "$kvm" "$user_home/.local/state/omarchy-macos-vm/vm-created"
+rm -rf "$lstate" "$limages" "$kvm" "$ldefault" "$user_home/.local/state/omarchy-macos-vm/vm-created"
 mkdir -p "$lstate"
 run_login
 (( status == 0 )) && ! grep -q '^\(notify\|terminal\)' "$calls" || fail "before the macOS step login does nothing" "$(cat "$calls")"
@@ -268,11 +278,11 @@ TEST_ACTIVE=1 run_login
 mkdir -p "$limages/b-restore"; touch "$limages/b-restore/.ingested"
 run_login
 grep -q '^notify .*restart to finish Boot linux-aurora-vmapple from the Limine menu' "$calls" && ! grep -q '^systemd-run' "$calls" ||
-  fail "imported on the stock kernel login only asks for the side kernel" "$(cat "$calls")"
-touch "$lstate/oneshot-armed"
+  fail "imported on the stock kernel without default-side-kernel login asks for the Limine menu" "$(cat "$calls")"
+printf 'linux-aurora-vmapple\n' >"$ldefault"
 run_login
-grep -q '^notify .*restart to finish Restart once: Omarchy starts linux-aurora-vmapple by itself' "$calls" ||
-  fail "with the one-time boot armed login asks only for a restart" "$(cat "$calls")"
+grep -q '^notify .*restart to finish Restart once: Omarchy starts linux-aurora-vmapple by default' "$calls" ||
+  fail "with persistent default enabled login asks only for a restart" "$(cat "$calls")"
 touch "$kvm"
 run_login
 grep -q '^systemd-run .*create --auto' "$calls" || fail "on the side kernel login finishes the VM" "$(cat "$calls")"

@@ -26,5 +26,8 @@ if [[ ${OMARCHY_MAC_BOOT_UPDATE_GRUB:-1} != 0 ]] &&
   update-grub >/dev/null || echo "omarchy-mac-boot-update: update-grub failed; Limine is unaffected" >&2
 fi
 omarchy-mac-limine-cmdline || { echo "omarchy-mac-boot-update: could not derive the Limine command line" >&2; exit 1; }
+if command -v omarchy-mac-limine-boot-order >/dev/null 2>&1; then
+  omarchy-mac-limine-boot-order || { echo "omarchy-mac-boot-update: could not reconcile the Limine boot order" >&2; exit 1; }
+fi
 limine-update || { echo "omarchy-mac-boot-update: limine-update failed" >&2; exit 1; }
 omarchy-mac-limine-deploy || exit 1

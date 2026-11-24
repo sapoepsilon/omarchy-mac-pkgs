@@ -915,6 +915,19 @@ side_kernel_system
 run_check --boot-chain
 expect_pass "a declared side kernel first in the menu"
 grep -Fq "starts the side kernel linux-aurora-vmapple first" "$test_tmp/err" || fail "a side kernel first is named" "$(cat "$test_tmp/err")"
+# Persistent default after reboot: running linux-aurora-vmapple with it first in
+# limine.conf and stock kernel selectable second passes both full and --boot-chain checks.
+TEST_UNAME=6.1.0-vmapple1-ARCH run_check
+expect_pass "running a declared side kernel that is also first in the menu (full check)"
+TEST_UNAME=6.1.0-vmapple1-ARCH run_check --boot-chain
+expect_pass "running a declared side kernel that is also first in the menu (--boot-chain)"
+# System ESP mismatch on the default side kernel's UKI fails cleanly.
+mkdir -p "$root/proc/device-tree/chosen" "$existing"
+printf '%s\0' "$partuuid" >"$root/proc/device-tree/chosen/asahi,efi-system-partition"
+cp -a "$esp/." "$existing/"
+printf 'stale side uki\n' >"$existing/EFI/Linux/omarchy_linux-aurora-vmapple.efi"
+TEST_EXISTING_MOUNT="$existing" TEST_UNAME=6.1.0-vmapple1-ARCH run_check --boot-chain
+expect_fail "a system ESP with another side-kernel UKI" "/boot/efi/EFI/Linux/omarchy_linux-aurora-vmapple.efi is not the one on the system ESP"
 side_kernel_system
 rm "$root/usr/share/omarchy-mac-boot/side-kernels.d/linux-aurora-vmapple"
 run_check --boot-chain

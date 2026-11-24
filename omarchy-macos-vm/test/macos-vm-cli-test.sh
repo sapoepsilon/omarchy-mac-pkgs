@@ -26,6 +26,8 @@ home=$test_tmp/home
 images=$home/.local/share/omvm/images
 kvm_param=$test_tmp/emulate_nisv_ldst
 progress=$home/.local/state/omarchy-macos-vm/progress
+default_side=$test_tmp/default-side-kernel
+marker=$test_tmp/macos-vm.enabled
 
 stub omarchy-notification-send 'printf "notify %s\n" "$*" >>"$TEST_LOG"'
 stub systemd-run 'echo "systemd-run $*" >>"$TEST_LOG"'
@@ -46,26 +48,29 @@ run_cmd() {
   env PATH="$stub_bin:$PATH" TEST_LOG="$log" TEST_VMDIR="$vm" \
     HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_STATE_HOME="$home/.local/state" XDG_DATA_HOME="$home/.local/share" \
     XDG_RUNTIME_DIR="$test_tmp/run" OMVM_IMAGES="$images" OMARCHY_MACOS_VM_STATE="$state" \
+    OMARCHY_MACOS_VM_MARKER="$marker" OMARCHY_MAC_DEFAULT_SIDE_KERNEL="$default_side" \
+    OMARCHY_MACOS_VM_BOOT_DEFAULT="${TEST_BOOT_DEFAULT:-$stub_bin/boot-default}" \
     OMARCHY_MACOS_VM_KVM_PARAM="$kvm_param" OMARCHY_MACOS_VM_REQUIRED_GB=0 OMARCHY_MACOS_VM_NOTIFY_WAIT=0 \
     OMARCHY_MACOS_VM_NO_LAUNCH=1 OMARCHY_MACOS_VM_PROGRESS_POLL=0 \
     bash "$command" "$@" >"$test_tmp/out" 2>&1
   status=$?
   set -e
 }
-reset() { rm -rf "$state" "$vm" "$home" "$kvm_param" "$test_tmp/run"; mkdir -p "$state" "$vm" "$test_tmp/run"; }
+reset() { rm -rf "$state" "$vm" "$home" "$kvm_param" "$default_side" "$marker" "$test_tmp/run"; mkdir -p "$state" "$vm" "$test_tmp/run"; }
 value() { sed -n "s/^$1=//p" "$progress"; }
 
 # create on the stock kernel: the import moves the progress on, then waits for the restart.
 reset
-touch "$state/done" "$state/vmxfer-ready" "$state/oneshot-armed"
+touch "$state/done" "$state/vmxfer-ready"
+printf 'linux-aurora-vmapple\n' >"$default_side"
 run_cmd create --auto
 (( status == 2 )) || fail "create on the stock kernel stops for the restart (exit 2)" "$(cat "$test_tmp/out")"
 [[ $(value stage) == restart-needed && $(value percent) == 35 ]] || fail "the progress says a restart is needed" "$(cat "$progress")"
 grep -Fxq '== unpacking bundle' "$home/.local/state/omarchy-macos-vm/create.log" || fail "omvm's output goes to the create log"
-grep -q '^notify .*restart to finish Restart once' "$log" || fail "create asks for one restart" "$(cat "$log")"
+grep -q '^notify .*restart to finish Restart once: Omarchy starts linux-aurora-vmapple by default' "$log" || fail "create asks for one restart" "$(cat "$log")"
 run_cmd progress
 (( status == 0 )) && grep -Fq '[x] Importing' "$test_tmp/out" && grep -Fq '[>] Restart needed' "$test_tmp/out" &&
-  grep -Fq 'Restart needed. Restart once' "$test_tmp/out" || fail "the progress view ends at Restart needed" "$(cat "$test_tmp/out")"
+  grep -Fq 'Restart needed. Restart once: Omarchy starts linux-aurora-vmapple by default' "$test_tmp/out" || fail "the progress view ends at Restart needed" "$(cat "$test_tmp/out")"
 pass "create records Importing, then Restart needed, and the progress view says so"
 
 # On the side kernel: Setting up, then Ready.
@@ -143,3 +148,19 @@ rm -f "$state/status"
 run_cmd launch
 (( status == 1 )) && grep -q '^notify .*not set up yet' "$log" || fail "launch with nothing running still says what is next" "$(cat "$log")"
 pass "the macOS launcher, clicked while the VM is being made, shows the stage and the progress view"
+
+# remove restores stock linux-aurora default via omarchy-macos-vm-boot-default disable.
+reset
+touch "$marker" "$state/done" "$state/vmxfer-ready" "$state/oneshot-armed" "$state/oneshot-tries"
+printf 'linux-aurora-vmapple\n' >"$default_side"
+stub gum 'exit 0'
+stub sudo 'exec "$@"'
+stub omarchy-pkg-present 'echo "pkg-present $*" >>"$TEST_LOG"; exit 0'
+stub omarchy-pkg-remove 'echo "pkg-remove $*" >>"$TEST_LOG"; exit 0'
+stub boot-default 'echo "boot-default $*" >>"$TEST_LOG"; [[ $1 == disable ]] && rm -f "$OMARCHY_MAC_DEFAULT_SIDE_KERNEL"'
+run_cmd remove
+(( status == 0 )) || fail "remove succeeds" "$(cat "$test_tmp/out")"
+grep -Fxq 'boot-default disable' "$log" || fail "remove calls boot-default disable" "$(cat "$log")"
+[[ ! -e $default_side && ! -e $marker && ! -e $state/done && ! -e $state/oneshot-armed ]] ||
+  fail "remove cleans up default-side-kernel, marker and state" "$(cat "$log")"
+pass "remove disables persistent side-kernel boot default and cleans up state"

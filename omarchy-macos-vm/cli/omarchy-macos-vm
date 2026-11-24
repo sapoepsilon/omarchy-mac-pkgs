@@ -18,8 +18,9 @@
 # from install when the restored VM is already on VMXFER, and otherwise at
 # each Omarchy login until it exists (omarchy-macos-vm-create.service, in the
 # omarchy-macos-vm package, runs `create --auto` in the background). setup
-# needs the side kernel; omarchy-macos-vm-vmxfer.service arranges for it to
-# boot once by itself, so all that is left to the owner is one restart.
+# needs the side kernel; omarchy-macos-vm-boot-default keeps linux-aurora-vmapple
+# as the persistent default Limine entry (with stock linux-aurora selectable for
+# recovery), so all that is left to the owner is one restart.
 
 set -uo pipefail
 
@@ -43,6 +44,8 @@ desktop_file=$HOME/.local/share/applications/macos-vm.desktop
 vm_name=${OMVM_VM:-macos}
 # The side kernel exposes this KVM parameter; omvm setup needs it booted.
 side_kernel_param=${OMARCHY_MACOS_VM_KVM_PARAM:-/sys/module/kvm/parameters/emulate_nisv_ldst}
+boot_default_helper=${OMARCHY_MACOS_VM_BOOT_DEFAULT:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-boot-default}
+default_side_kernel=${OMARCHY_MAC_DEFAULT_SIDE_KERNEL:-/etc/omarchy-mac-boot/default-side-kernel}
 # The macOS restore makes a fixed 160 GB guest disk (sparse). The images, the
 # Xcode disk image and the setup layers need about this much free space.
 REQUIRED_SPACE_GB=${OMARCHY_MACOS_VM_REQUIRED_GB:-80}
@@ -198,9 +201,9 @@ bundle_ingested() { compgen -G "$omvm_images/*-restore/.ingested" >/dev/null; }
 vmxfer_ready() { [[ -e $state_dir/vmxfer-ready ]]; }
 on_side_kernel() { [[ -e $side_kernel_param ]]; }
 # omarchy-macos-vm-vmxfer.service keeps VMXFER mounted read-only here, so
-# omvm ingest needs no sudo password, and arms one boot of the side kernel.
+# omvm ingest needs no sudo password.
 vmxfer_mount() { sed -n 's/^mount=//p' "$state_dir/vmxfer-ready" 2>/dev/null | tail -1; }
-oneshot_armed() { [[ -e $state_dir/oneshot-armed ]]; }
+side_kernel_default() { [[ -f $default_side_kernel ]] && grep -Fxq "$side_kernel" "$default_side_kernel" 2>/dev/null; }
 
 # --- progress ----------------------------------------------------------------
 
@@ -374,8 +377,8 @@ show_progress() {
 
 # What to do on the stock kernel once the VM is imported.
 restart_step() {
-  if oneshot_armed; then
-    echo "Restart once: Omarchy starts $side_kernel by itself and finishes the VM at the next login."
+  if side_kernel_default; then
+    echo "Restart once: Omarchy starts $side_kernel by default and finishes the VM at the next login."
   else
     echo "Boot $side_kernel from the Limine menu; the VM is finished at the next login."
   fi
@@ -887,7 +890,10 @@ remove_macos() {
   if ((${#installed[@]})); then
     omarchy-pkg-remove "${installed[@]}" || exit 1
   fi
-  sudo rm -f "$marker" "$state_dir/done" "$state_dir/vmxfer-ready"
+  if [[ -x $boot_default_helper ]]; then
+    sudo "$boot_default_helper" disable || exit 1
+  fi
+  sudo rm -f "$marker" "$state_dir/done" "$state_dir/vmxfer-ready" "$state_dir/oneshot-armed" "$state_dir/oneshot-tries"
   rm -f "$desktop_file" "$config_file"
   rm -rf "$user_state"
 

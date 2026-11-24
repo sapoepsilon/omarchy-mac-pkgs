@@ -1,13 +1,14 @@
-# At boot, once the stack is installed: whether the macOS side (the installer's
-# macOS VM step, or the one-time macOS step) left the restored VM on VMXFER
-# (/var/lib/omarchy/macos-vm/vmxfer-ready). If so it keeps VMXFER mounted
-# read-only for omvm ingest and arms one boot of linux-aurora-vmapple.
-# omarchy-macos-vm-setup and omarchy-macos-vm install start it too.
+# At boot, once the stack is installed: ensure linux-aurora-vmapple stays the
+# persistent default Limine boot entry and check whether the macOS side (the
+# installer's macOS VM step, or the one-time macOS step) left the restored VM
+# on VMXFER (/var/lib/omarchy/macos-vm/vmxfer-ready). If so it keeps VMXFER
+# mounted read-only for omvm ingest. omarchy-macos-vm-setup and
+# omarchy-macos-vm install start it too.
 [Unit]
 Description=Omarchy: look for the macOS step's VM on VMXFER
 ConditionPathExists=/etc/omarchy/macos-vm.enabled
 ConditionPathExists=/var/lib/omarchy/macos-vm/done
-After=local-fs.target omarchy-macos-vm-oneshot-restore.service
+After=local-fs.target
 
 [Service]
 Type=oneshot

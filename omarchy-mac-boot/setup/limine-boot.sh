@@ -116,6 +116,9 @@ CONF
   cmdline_command=$(command -v omarchy-mac-limine-cmdline) || limine_boot_fail "the command-line helper is missing"
   sudo ln -sfn "$cmdline_command" "$boot_hooks_dir/20-omarchy-mac-cmdline" || limine_boot_fail "cannot install the command-line hook"
   sudo omarchy-mac-limine-cmdline || limine_boot_fail "could not derive the kernel command line"
+  if command -v omarchy-mac-limine-boot-order >/dev/null 2>&1; then
+    sudo omarchy-mac-limine-boot-order || limine_boot_fail "could not reconcile the Limine boot order"
+  fi
   sudo grep -Eq '^KERNEL_CMDLINE\[default\]\+?="root=UUID=' "$limine_default" || limine_boot_fail "no root= in the derived command line"
 
   # The entry tool keys history by machine-id. Discard foreign history only

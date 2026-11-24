@@ -2,4 +2,3 @@
 # /etc/omarchy/macos-vm.enabled exists.
 enable omarchy-macos-vm-setup.service
 enable omarchy-macos-vm-vmxfer.service
-enable omarchy-macos-vm-oneshot-restore.service

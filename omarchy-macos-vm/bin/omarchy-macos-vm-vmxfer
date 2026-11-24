@@ -8,9 +8,10 @@
 #
 # When the VM is there, VMXFER stays mounted read-only at
 # /run/omarchy-macos-vm/vmxfer (the stamp's mount=), so the user's
-# `omvm ingest` at login needs no sudo password, and the side kernel is armed
-# to boot once by itself (omarchy-macos-vm-oneshot-boot arm). Nothing is
-# verified or copied here (omvm ingest does that, as the user).
+# `omvm ingest` at login needs no sudo password. Every run also ensures the
+# persistent default boot entry stays linux-aurora-vmapple while the macOS VM
+# stack is enabled (idempotent, and migrates older oneshot installs). Nothing
+# is verified or copied here (omvm ingest does that, as the user).
 
 set -uo pipefail
 
@@ -18,11 +19,17 @@ root=${OMARCHY_MACOS_VM_ROOT:-}
 state_dir=$root/var/lib/omarchy/macos-vm
 stamp=$state_dir/vmxfer-ready
 mnt=${OMARCHY_MACOS_VM_VMXFER_MNT:-/run/omarchy-macos-vm/vmxfer}
-oneshot=${OMARCHY_MACOS_VM_ONESHOT:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-oneshot-boot}
+boot_default=${OMARCHY_MACOS_VM_BOOT_DEFAULT:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-boot-default}
 users_helper=${OMARCHY_MACOS_VM_USERS:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-users}
 credentials_helper=${OMARCHY_MACOS_VM_CREDENTIALS:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-credentials}
 
 say() { printf 'omarchy-macos-vm-vmxfer: %s\n' "$*"; }
+
+# Ensure linux-aurora-vmapple stays the persistent default Limine entry while
+# the stack is enabled (and clean up any legacy oneshot-boot state).
+if [[ -x $boot_default ]]; then
+  "$boot_default" enable || say "could not ensure linux-aurora-vmapple is the default boot entry"
+fi
 
 # Every boot until it is done: the installer's macOS account to the owner
 # (the owner may not have existed when omarchy-macos-vm-setup ran).
@@ -58,9 +65,6 @@ if [[ -f $dir/vmxfer.sha256 ]] && compgen -G "$dir/*-restore.tar.gz" >/dev/null;
     printf 'device=%s\nmount=%s\nfound=%s\n' "$device" "$dir" "$(date -u +%FT%TZ)" >"$stamp.new" &&
     mv -f "$stamp.new" "$stamp"
   say "the restored macOS VM is on $device ($dir): it is finished at the next login"
-  if [[ -x $oneshot ]]; then
-    "$oneshot" arm || say "could not arm the side kernel's one-time boot"
-  fi
   # Whoever is logged in starts the import now (omarchy-macos-vm-create.service).
   [[ -x $users_helper ]] && "$users_helper" kick
   exit 0

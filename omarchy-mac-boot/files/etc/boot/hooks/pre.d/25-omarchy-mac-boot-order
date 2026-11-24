@@ -1,0 +1,4 @@
+#!/bin/bash
+# Reconcile BOOT_ORDER in /etc/default/limine with any declared default side
+# kernel before limine-entry-tool rebuilds UKIs and limine.conf.
+/usr/bin/omarchy-mac-limine-boot-order

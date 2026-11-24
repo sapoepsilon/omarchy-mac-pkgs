@@ -55,7 +55,7 @@ if ! grep -q '^/+Omarchy' "$TEST_ESP/limine.conf"; then
 fi
 SH
 chmod +x "$stub_bin"/*
-for name in omarchy-mac-limine-cmdline omarchy-mac-limine-deploy omarchy-mac-limine-active; do
+for name in omarchy-mac-limine-cmdline omarchy-mac-limine-boot-order omarchy-mac-limine-deploy omarchy-mac-limine-active; do
   ln -s "$ROOT/bin/$name" "$stub_bin/$name"
 done
 
@@ -79,6 +79,8 @@ run() {
   OMARCHY_PACMAN_HOOKS_DIR="$etc/pacman.d/hooks" OMARCHY_SYSTEMD_DIR="$etc/systemd/system" \
   OMARCHY_LIMINE_GATE="$test_tmp/limine.enabled" OMARCHY_FSTAB="$etc/fstab" \
   OMARCHY_MACHINE_ID="$etc/machine-id" \
+  OMARCHY_MAC_DEFAULT_SIDE_KERNEL="$etc/default-side-kernel" \
+  OMARCHY_MAC_SIDE_KERNELS_DIR="$test_tmp/side-kernels.d" \
   OMARCHY_LIMINE_MENU_DEFAULTS="$ROOT/files/usr/lib/omarchy/mac-boot/limine-menu-defaults" \
   PATH="$stub_bin:$PATH" TEST_LEAF="$leaf" bash -c '
     trap "echo caller-trap >&2" ERR
@@ -398,3 +400,20 @@ done
 printf 'KERNEL_CMDLINE[default]+="rw quiet"\n' >"$test_tmp/forms"
 ! eval "grep -Eq $check \"\$test_tmp/forms\"" || fail "the root= check refuses a line without root=UUID="
 pass "the setup's root= check takes both the += and = forms"
+
+# Reactivating Limine when a persistent default side kernel is declared preserves
+# the side kernel first in BOOT_ORDER with stock linux-aurora second.
+rm -f "$stub_bin/omarchy-mac-limine-deploy"
+ln -s "$ROOT/bin/omarchy-mac-limine-deploy" "$stub_bin/omarchy-mac-limine-deploy"
+mkdir -p "$test_tmp/side-kernels.d"
+: >"$test_tmp/side-kernels.d/linux-aurora-vmapple"
+printf 'linux-aurora-vmapple\n' >"$etc/default-side-kernel"
+cat >"$stub_bin/pacman" <<'SH'
+#!/bin/bash
+[[ $1 == -Qq ]] && printf 'linux-aurora\nlinux-aurora-vmapple\n'
+SH
+chmod +x "$stub_bin/pacman"
+run || fail "reactivation with a declared default side kernel succeeds"
+grep -Fxq 'BOOT_ORDER="linux-aurora-vmapple, linux-aurora, *, *fallback, Snapshots"' "$etc/limine" ||
+  fail "limine-boot keeps the declared default side kernel first in BOOT_ORDER" "$(cat "$etc/limine")"
+pass "Limine activation preserves a declared persistent default side kernel in BOOT_ORDER"

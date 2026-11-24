@@ -6,12 +6,13 @@
 
 pkgname=omarchy-macos-vm
 pkgver=0.1.0
-pkgrel=8
+pkgrel=9
 pkgdesc="Omarchy Mac: install the macOS VM stack (omvm) when the installer asked for it"
 arch=('any')
 url="https://github.com/sapoepsilon/omarchy-mac-pkgs/tree/macos-vm/omarchy-macos-vm"
 license=('MIT')
 depends=(bash python systemd pacman jq gum)
+install=omarchy-macos-vm.install
 # The identity-enabled QEMU that apple-services import brings over links these.
 optdepends=('vte3: apple-services QEMU' 'virglrenderer: apple-services QEMU'
             'libcacard: apple-services QEMU' 'usbredir: apple-services QEMU')

@@ -5,8 +5,8 @@
 # it), run `omarchy-macos-vm create --auto` in the background, as a transient
 # user unit: it imports the VM, and on linux-aurora-vmapple sets it up and
 # defines it, telling the owner in notifications. On the stock kernel it stops
-# after the import and asks for one restart (the side kernel is armed to boot
-# once by itself). Its log: journalctl --user -u omarchy-macos-vm-creating.
+# after the import and asks for one restart (linux-aurora-vmapple is set as the
+# persistent default boot entry). Its log: journalctl --user -u omarchy-macos-vm-creating.
 # Like the Windows VM install, the progress shows in a floating terminal
 # (omarchy-macos-vm progress). omarchy-macos-vm-create.path also runs this
 # during a session, when the system side becomes ready after the login.
@@ -16,7 +16,9 @@ set -uo pipefail
 state_dir=${OMARCHY_MACOS_VM_STATE:-/var/lib/omarchy/macos-vm}
 images=${OMVM_IMAGES:-${XDG_DATA_HOME:-$HOME/.local/share}/omvm/images}
 created=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-macos-vm/vm-created
+side_kernel=linux-aurora-vmapple
 side_kernel_param=${OMARCHY_MACOS_VM_KVM_PARAM:-/sys/module/kvm/parameters/emulate_nisv_ldst}
+default_side_kernel=${OMARCHY_MAC_DEFAULT_SIDE_KERNEL:-/etc/omarchy-mac-boot/default-side-kernel}
 vm_name=${OMVM_VM:-macos}
 unit=omarchy-macos-vm-creating
 progress_cmd="omarchy-launch-floating-terminal-with-presentation 'omarchy-macos-vm progress'"
@@ -48,12 +50,12 @@ if ((!ingested)) && [[ ! -e $state_dir/vmxfer-ready ]]; then
 fi
 
 if ((ingested)) && [[ ! -e $side_kernel_param ]]; then
-  if [[ -e $state_dir/oneshot-armed ]]; then
+  if [[ -f $default_side_kernel ]] && grep -Fxq "$side_kernel" "$default_side_kernel" 2>/dev/null; then
     notify -u critical "macOS VM: restart to finish" \
-      "Restart once: Omarchy starts linux-aurora-vmapple by itself and finishes the VM at the next login."
+      "Restart once: Omarchy starts $side_kernel by default and finishes the VM at the next login."
   else
     notify -u critical "macOS VM: restart to finish" \
-      "Boot linux-aurora-vmapple from the Limine menu; the VM is finished at the next login."
+      "Boot $side_kernel from the Limine menu; the VM is finished at the next login."
   fi
   exit 0
 fi

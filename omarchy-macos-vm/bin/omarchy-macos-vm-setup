@@ -2,12 +2,13 @@
 
 # omarchy-macos-vm-setup.service: once /etc/omarchy/macos-vm.enabled exists,
 # install the macOS VM stack (linux-aurora-vmapple, qemu-vmapple,
-# mesa-honeykrisp-vmapple, omvm), give the side kernel its UKI and Limine
-# entry, set up the host side omvm needs, and stage the one-time macOS step.
-# It never downloads Apple software, never changes the default boot entry, and
-# never touches the stock kernel. Idempotent: every step checks before it acts,
-# and a failure leaves the done stamp unwritten. Without internet it waits, then
-# exits 75 so the unit restarts (and NetworkManager starts it when a link comes up).
+# mesa-honeykrisp-vmapple, omvm), give the side kernel its UKI and persistent
+# default Limine entry (keeping stock linux-aurora installed and selectable for
+# recovery), set up the host side omvm needs, and stage the one-time macOS step.
+# It never downloads Apple software and never removes or modifies the stock
+# kernel. Idempotent: every step checks before it acts, and a failure leaves
+# the done stamp unwritten. Without internet it waits, then exits 75 so the
+# unit restarts (and NetworkManager starts it when a link comes up).
 #
 # The marker is JSON, {"version":1,"requested_by":"installer"}, written by
 # omarchy-mac-first-boot from install.conf's macos_vm=1. Optional keys:
@@ -31,6 +32,7 @@ optional_packages=(virt-manager)
 side_kernel=linux-aurora-vmapple
 users_helper=${OMARCHY_MACOS_VM_USERS:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-users}
 credentials_helper=${OMARCHY_MACOS_VM_CREDENTIALS:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-credentials}
+boot_default_helper=${OMARCHY_MACOS_VM_BOOT_DEFAULT:-/usr/lib/omarchy-macos-vm/omarchy-macos-vm-boot-default}
 # How long one run waits for internet before it exits 75 and the unit restarts.
 network_wait=${OMARCHY_MACOS_VM_NETWORK_WAIT:-900}
 
@@ -181,11 +183,16 @@ install_stack() {
 }
 
 # The kernel's pacman hooks build its initramfs and, on a Limine Mac, its UKI
-# and menu entry. Rebuild once if they did not, then hold the stock boot chain
-# to the same check omarchy update does.
+# and menu entry. Make the side kernel the persistent default Limine entry
+# (keeping stock linux-aurora selectable for recovery), rebuild once if its
+# entry or UKI is missing, then hold the boot chain to the same check omarchy
+# update does.
 check_boot() {
   local conf=$esp/limine.conf
   if omarchy-mac-limine-active 2>/dev/null; then
+    if [[ -x $boot_default_helper ]]; then
+      "$boot_default_helper" enable || fail "could not make $side_kernel the default boot entry"
+    fi
     if ! grep -Fq "//$side_kernel" "$conf" 2>/dev/null || [[ ! -s $esp/EFI/Linux/omarchy_$side_kernel.efi ]]; then
       say "building the $side_kernel UKI and Limine entry"
       omarchy-mac-boot-update || fail "omarchy-mac-boot-update failed"
@@ -206,8 +213,9 @@ host_setup() {
   systemd-tmpfiles --create omvm-udmabuf.conf 2>/dev/null || say "udmabuf limits apply after the next boot"
   systemctl --global enable omarchy-macos-vm-user.service omarchy-macos-vm-create.service omarchy-macos-vm-create.path ||
     fail "cannot enable omarchy-macos-vm-user.service for users"
-  systemctl enable omarchy-macos-vm-vmxfer.service omarchy-macos-vm-oneshot-restore.service >/dev/null 2>&1 ||
+  systemctl enable omarchy-macos-vm-vmxfer.service >/dev/null 2>&1 ||
     say "omarchy-macos-vm-vmxfer.service is enabled by its preset"
+  systemctl disable omarchy-macos-vm-oneshot-restore.service >/dev/null 2>&1 || true
 }
 
 # Whether VMXFER already holds the restored VM (the developer installer's
@@ -234,7 +242,7 @@ stage_macos_step() {
     {
       printf 'The restored macOS VM is on VMXFER (the installer made it before this first boot).\n\n'
       printf '1. Log in: Omarchy imports it in the background (omvm ingest, 10-20 minutes).\n'
-      printf '2. Restart once: Omarchy starts %s by itself (omvm setup needs it).\n' "$side_kernel"
+      printf '2. Restart once: Omarchy starts %s by default (omvm setup needs it).\n' "$side_kernel"
       printf '3. Log in again: the VM is set up and defined (omvm setup, omvm virt; 10-30 minutes).\n\n'
       printf 'Then open "macOS" from the launcher (Super + Space).\n'
       printf 'Progress: omarchy-macos-vm progress (opens by itself in a terminal)\n'
@@ -244,8 +252,8 @@ stage_macos_step() {
   fi
   omvm macos-step >"$next_steps" 2>&1 || fail "omvm macos-step failed: $(tail -n 1 "$next_steps")"
   {
-    printf '\nBefore the macOS step, boot "%s" once from the Limine menu to try it;\n' "$side_kernel"
-    printf 'after it, the VM is finished at the next logins (omvm ingest, setup, virt).\n'
+    printf '\nRestart to boot "%s" (set as default; stock linux-aurora stays in the Limine menu for recovery);\n' "$side_kernel"
+    printf 'after the macOS step, the VM is finished at the next logins (omvm ingest, setup, virt).\n'
   } >>"$next_steps"
   say "next steps for the owner are in $next_steps"
 }
@@ -273,12 +281,12 @@ main() {
   if [[ -x $credentials_helper ]]; then
     "$credentials_helper" || say "could not hand over the macOS VM account yet; the next boot retries"
   fi
-  # Look on VMXFER now, not at the next boot: it mounts it for ingest and arms
-  # the side kernel's one-time boot, so the first login can start the import.
+  # Look on VMXFER now, not at the next boot: it mounts it for ingest so the
+  # first login can start the import.
   systemctl start --no-block omarchy-macos-vm-vmxfer.service >/dev/null 2>&1 || true
   # A user already logged in gets the per-user steps now, not at the next login.
   users kick || true
-  say "the macOS VM stack is installed; $side_kernel is in the boot menu, the stock kernel stays the default"
+  say "the macOS VM stack is installed; $side_kernel is the default boot entry, stock linux-aurora stays selectable in the Limine menu"
 }
 
 main "$@"

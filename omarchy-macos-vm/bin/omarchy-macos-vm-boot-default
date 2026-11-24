@@ -1,0 +1,243 @@
+#!/bin/bash
+
+# omarchy-macos-vm-boot-default enable|disable: keep linux-aurora-vmapple as
+# the persistent default Limine boot entry whenever the macOS VM stack is
+# installed/enabled, while leaving stock linux-aurora installed and selectable
+# in limine.conf as a recovery entry.
+#
+# Persistence works through Limine's BOOT_ORDER (not a one-shot default_entry
+# flip that reverts on the next boot):
+# - enable: records linux-aurora-vmapple in /etc/omarchy-mac-boot/default-side-kernel,
+#   updates /etc/default/limine's BOOT_ORDER via omarchy-mac-limine-boot-order
+#   (so linux-aurora-vmapple leads and stock linux-aurora stays right after it),
+#   rebuilds limine.conf if needed via omarchy-mac-boot-update, aligns
+#   default_entry if stale, and cleans up any legacy oneshot-boot state.
+# - disable: removes /etc/omarchy-mac-boot/default-side-kernel, restores stock
+#   linux-aurora first in BOOT_ORDER, regenerates limine.conf if needed, aligns
+#   default_entry to stock linux-aurora, and cleans up any legacy oneshot state.
+
+set -uo pipefail
+
+root=${OMARCHY_MACOS_VM_ROOT:-}
+state_dir=$root/var/lib/omarchy/macos-vm
+esp=${OMARCHY_ESP:-/boot/efi}
+conf=$esp/limine.conf
+limine_default=${OMARCHY_LIMINE_DEFAULT:-$root/etc/default/limine}
+default_side_file=${OMARCHY_MAC_DEFAULT_SIDE_KERNEL:-$root/etc/omarchy-mac-boot/default-side-kernel}
+side_kernel_dir=${OMARCHY_MAC_SIDE_KERNELS_DIR:-$root/usr/share/omarchy-mac-boot/side-kernels.d}
+side_kernel=linux-aurora-vmapple
+legacy_armed=$state_dir/oneshot-armed
+legacy_tries=$state_dir/oneshot-tries
+
+say() { printf 'omarchy-macos-vm-boot-default: %s\n' "$*"; }
+
+# Limine numbers its entries in menu order, directories included: the kernel's
+# position among the lines that open an entry ("/", "//", "///"...).
+entry_number() {
+  awk -v want="//$1" '
+    /^[[:space:]]*\// { n++; line = $0; sub(/^[[:space:]]*/, "", line); sub(/[[:space:]]*$/, "", line)
+                        if (line == want) { print n; exit } }' "$conf"
+}
+
+first_kernel() {
+  awk '{ sub(/^[[:space:]]+/, "") } /^\/\/[^\/]/ { print substr($0, 3); exit }' "$conf" 2>/dev/null
+}
+
+current_default() {
+  sed -n 's/^default_entry:[[:space:]]*//p' "$conf" 2>/dev/null | head -1
+}
+
+# Rewrites limine.conf beside itself, then renames it over (one FAT rename).
+set_default() {
+  local value=$1 tmp=$conf.omarchy-macos-vm.new
+  if [[ -z $value ]]; then
+    sed '/^default_entry:/d' "$conf" >"$tmp"
+  elif grep -q '^default_entry:' "$conf"; then
+    sed "s/^default_entry:.*/default_entry: $value/" "$conf" >"$tmp"
+  else
+    { printf 'default_entry: %s\n' "$value"; cat "$conf"; } >"$tmp"
+  fi || { rm -f "$tmp"; return 1; }
+  [[ -s $tmp ]] || { rm -f "$tmp"; return 1; }
+  sync -f "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$conf"
+}
+
+cleanup_legacy_oneshot() {
+  local previous set
+  if [[ -e $legacy_armed ]]; then
+    previous=$(sed -n 's/^previous=//p' "$legacy_armed" 2>/dev/null)
+    set=$(sed -n 's/^set=//p' "$legacy_armed" 2>/dev/null)
+    if [[ -f $conf && -n $set && $(current_default) == "$set" ]]; then
+      set_default "$previous" || say "could not clear legacy oneshot default_entry in $conf"
+    fi
+  fi
+  rm -f "$legacy_armed" "$legacy_tries"
+}
+
+detect_stock_kernel() {
+  local k current token
+  if k=$(omarchy-mac-kernel 2>/dev/null) && [[ $k == linux-aurora || $k == linux-asahi ]]; then
+    printf '%s\n' "$k"
+    return 0
+  fi
+  if [[ -f $limine_default ]]; then
+    current=$(sed -n -E 's/^[[:space:]]*BOOT_ORDER=("([^"]*)"|'\''([^'\'']*)'\''|([^[:space:]#"'\'']*)).*/\2\3\4/p' "$limine_default" | tail -n 1)
+    IFS=',' read -r -a tokens <<<"$current"
+    for token in "${tokens[@]}"; do
+      token=${token#"${token%%[![:space:]]*}"}
+      token=${token%"${token##*[![:space:]]}"}
+      if [[ $token == linux-aurora || $token == linux-asahi ]]; then
+        printf '%s\n' "$token"
+        return 0
+      fi
+    done
+  fi
+  printf 'linux-aurora\n'
+}
+
+# Fallback BOOT_ORDER editor when an older omarchy-mac-boot without
+# omarchy-mac-limine-boot-order is installed.
+fallback_boot_order() {
+  local action=$1 stock current token item joined="" tmp
+  local -a raw=() out=()
+  [[ -f $limine_default ]] || return 0
+  stock=$(detect_stock_kernel)
+  current=$(sed -n -E 's/^[[:space:]]*BOOT_ORDER=("([^"]*)"|'\''([^'\'']*)'\''|([^[:space:]#"'\'']*)).*/\2\3\4/p' "$limine_default" | tail -n 1)
+  if [[ -n $current ]]; then
+    IFS=',' read -r -a raw <<<"$current"
+  else
+    [[ $action == enable ]] || return 0
+    raw=("$stock" "*" "*fallback" "Snapshots")
+  fi
+
+  append_unique() {
+    local candidate=$1 existing
+    [[ -n $candidate ]] || return 0
+    for existing in "${out[@]}"; do
+      [[ $existing == "$candidate" ]] && return 0
+    done
+    out+=("$candidate")
+  }
+
+  [[ $action == enable ]] && append_unique "$side_kernel"
+  append_unique "$stock"
+  for token in "${raw[@]}"; do
+    item=${token#"${token%%[![:space:]]*}"}
+    item=${item%"${item##*[![:space:]]}"}
+    [[ -n $item ]] || continue
+    [[ $action == disable && $item == "$side_kernel" ]] && continue
+    append_unique "$item"
+  done
+  for item in "${out[@]}"; do
+    joined+="${joined:+, }$item"
+  done
+
+  tmp=$(mktemp) || return 1
+  awk -v line="BOOT_ORDER=\"$joined\"" '
+    /^[[:space:]]*BOOT_ORDER[[:space:]]*=/ { if (!done) { print line; done = 1 }; next }
+    { print }
+    END { if (!done) print line }
+  ' "$limine_default" >"$tmp" || { rm -f "$tmp"; return 1; }
+  if ! cmp -s "$tmp" "$limine_default"; then
+    install -m644 "$tmp" "$limine_default" || { rm -f "$tmp"; return 1; }
+  fi
+  rm -f "$tmp"
+}
+
+reconcile_boot_order() {
+  local action=$1
+  if command -v omarchy-mac-limine-boot-order >/dev/null 2>&1; then
+    if [[ $action == enable ]]; then
+      OMARCHY_MAC_BOOT_ROOT="$root" OMARCHY_LIMINE_DEFAULT="$limine_default" \
+        OMARCHY_MAC_DEFAULT_SIDE_KERNEL="$default_side_file" \
+        OMARCHY_MAC_SIDE_KERNELS_DIR="$side_kernel_dir" \
+        omarchy-mac-limine-boot-order
+    else
+      OMARCHY_MAC_BOOT_ROOT="$root" OMARCHY_LIMINE_DEFAULT="$limine_default" \
+        OMARCHY_MAC_DEFAULT_SIDE_KERNEL="$default_side_file" \
+        OMARCHY_MAC_SIDE_KERNELS_DIR="$side_kernel_dir" \
+        omarchy-mac-limine-boot-order --restore "$side_kernel"
+    fi
+  else
+    fallback_boot_order "$action"
+  fi
+}
+
+enable() {
+  local number cur
+  cleanup_legacy_oneshot
+  omarchy-mac-limine-active 2>/dev/null || {
+    say "this Mac does not boot with Limine; pick $side_kernel at boot"
+    return 0
+  }
+  if [[ ! -f $side_kernel_dir/$side_kernel ]] || ! pacman -Q "$side_kernel" >/dev/null 2>&1; then
+    say "$side_kernel is not installed as a declared side kernel; leaving the default boot entry unchanged"
+    return 0
+  fi
+
+  mkdir -p "${default_side_file%/*}" || { say "cannot create ${default_side_file%/*}"; return 1; }
+  if [[ ! -f $default_side_file ]] || [[ $(<"$default_side_file") != "$side_kernel" ]]; then
+    printf '%s\n' "$side_kernel" >"$default_side_file.new" &&
+      mv -f "$default_side_file.new" "$default_side_file" || {
+      rm -f "$default_side_file.new"
+      say "cannot write $default_side_file"
+      return 1
+    }
+  fi
+
+  reconcile_boot_order enable || { say "could not update BOOT_ORDER in $limine_default"; return 1; }
+
+  if [[ ! -f $conf ]] || [[ $(first_kernel) != "$side_kernel" ]] ||
+    [[ ! -s $esp/EFI/Linux/omarchy_$side_kernel.efi ]]; then
+    OMARCHY_MAC_BOOT_ROOT="$root" OMARCHY_LIMINE_DEFAULT="$limine_default" \
+      OMARCHY_MAC_DEFAULT_SIDE_KERNEL="$default_side_file" \
+      OMARCHY_MAC_SIDE_KERNELS_DIR="$side_kernel_dir" \
+      omarchy-mac-boot-update || { say "omarchy-mac-boot-update failed"; return 1; }
+  fi
+
+  [[ -f $conf ]] || { say "no $conf after boot update"; return 1; }
+  number=$(entry_number "$side_kernel")
+  [[ -n $number ]] || { say "$conf has no $side_kernel entry"; return 1; }
+  cur=$(current_default)
+  if [[ -n $cur && $cur != "$number" ]]; then
+    set_default "$number" || { say "cannot align default_entry in $conf"; return 1; }
+  fi
+  say "$side_kernel is the persistent default Limine boot entry (entry $number); stock kernel remains selectable"
+}
+
+disable() {
+  local current_side stock number cur
+  cleanup_legacy_oneshot
+  if [[ -f $default_side_file && ! -L $default_side_file ]]; then
+    current_side=$(awk '/^[[:space:]]*($|#)/{next}{sub(/^[[:space:]]+/,"");sub(/[[:space:]]+$/,"");print;exit}' "$default_side_file")
+    if [[ -z $current_side || $current_side == "$side_kernel" ]]; then
+      rm -f "$default_side_file"
+    fi
+  fi
+
+  omarchy-mac-limine-active 2>/dev/null || return 0
+  reconcile_boot_order disable || { say "could not restore BOOT_ORDER in $limine_default"; return 1; }
+
+  stock=$(detect_stock_kernel)
+  if [[ -f $conf && $(first_kernel) == "$side_kernel" ]]; then
+    OMARCHY_MAC_BOOT_ROOT="$root" OMARCHY_LIMINE_DEFAULT="$limine_default" \
+      OMARCHY_MAC_DEFAULT_SIDE_KERNEL="$default_side_file" \
+      OMARCHY_MAC_SIDE_KERNELS_DIR="$side_kernel_dir" \
+      omarchy-mac-boot-update || { say "omarchy-mac-boot-update failed"; return 1; }
+  fi
+
+  if [[ -f $conf ]]; then
+    number=$(entry_number "$stock")
+    cur=$(current_default)
+    if [[ -n $number && -n $cur && $cur != "$number" ]]; then
+      set_default "$number" || { say "cannot align default_entry in $conf"; return 1; }
+    fi
+  fi
+  say "restored $stock as the default Limine boot entry"
+}
+
+case ${1:-} in
+  enable) enable ;;
+  disable) disable ;;
+  *) echo "usage: omarchy-macos-vm-boot-default enable|disable" >&2; exit 64 ;;
+esac

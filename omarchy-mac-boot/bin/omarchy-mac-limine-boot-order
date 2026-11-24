@@ -1,0 +1,184 @@
+#!/bin/bash
+
+# omarchy:summary=Keep Limine's BOOT_ORDER in step with any declared persistent default side kernel
+# omarchy:args=[--restore <kernel>]
+# omarchy:requires-sudo=true
+# omarchy:hidden=true
+
+# Reconciles BOOT_ORDER in /etc/default/limine with
+# /etc/omarchy-mac-boot/default-side-kernel while keeping the stock Apple
+# kernel (linux-aurora or linux-asahi) right after it as a recovery entry.
+#
+# - Normal mode (no args; run from /etc/boot/hooks/pre.d/25-omarchy-mac-boot-order,
+#   omarchy-mac-boot-update, and setup/limine-boot.sh):
+#     * Without /etc/omarchy-mac-boot/default-side-kernel: no-op.
+#     * When it names a declared, installed side kernel (in
+#       /usr/share/omarchy-mac-boot/side-kernels.d/ and installed via pacman):
+#       puts that side kernel first and the stock Apple kernel second.
+#     * When it names a kernel that is no longer declared or installed:
+#       drops it from BOOT_ORDER so the stock Apple kernel is first again.
+# - --restore <kernel>:
+#     Drops <kernel> from BOOT_ORDER and puts the stock Apple kernel first.
+
+set -uo pipefail
+
+root=${OMARCHY_MAC_BOOT_ROOT:-}
+limine_default=${OMARCHY_LIMINE_DEFAULT:-$root/etc/default/limine}
+default_side_file=${OMARCHY_MAC_DEFAULT_SIDE_KERNEL:-$root/etc/omarchy-mac-boot/default-side-kernel}
+side_kernel_dir=${OMARCHY_MAC_SIDE_KERNELS_DIR:-$root/usr/share/omarchy-mac-boot/side-kernels.d}
+
+write_failed() {
+  echo "omarchy-mac-limine-boot-order: could not update $limine_default; $*" >&2
+  exit 100
+}
+
+valid_kernel_name() {
+  [[ $1 =~ ^linux-[A-Za-z0-9._-]+$ ]]
+}
+
+read_boot_order() {
+  sed -n -E 's/^[[:space:]]*BOOT_ORDER=("([^"]*)"|'\''([^'\'']*)'\''|([^[:space:]#"'\'']*)).*/\2\3\4/p' "$limine_default" | tail -n 1
+}
+
+read_default_side() {
+  [[ -f $default_side_file && ! -L $default_side_file ]] || return 1
+  awk '
+    /^[[:space:]]*($|#)/ { next }
+    { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, ""); print; exit }
+  ' "$default_side_file"
+}
+
+detect_stock_kernel() {
+  local k current token
+  if k=$(omarchy-mac-kernel 2>/dev/null) && [[ $k == linux-aurora || $k == linux-asahi ]]; then
+    printf '%s\n' "$k"
+    return 0
+  fi
+  current=$(read_boot_order)
+  IFS=',' read -r -a tokens <<<"$current"
+  for token in "${tokens[@]}"; do
+    token=${token#"${token%%[![:space:]]*}"}
+    token=${token%"${token##*[![:space:]]}"}
+    if [[ $token == linux-aurora || $token == linux-asahi ]]; then
+      printf '%s\n' "$token"
+      return 0
+    fi
+  done
+  return 1
+}
+
+is_declared_installed_side() {
+  local side=$1
+  valid_kernel_name "$side" && [[ -f $side_kernel_dir/$side ]] &&
+    pacman -Qq 2>/dev/null | grep -Fxq -- "$side"
+}
+
+# Build a deduplicated, comma-space-separated BOOT_ORDER:
+#   build_order STOCK SIDE_OR_EMPTY DROP_OR_EMPTY CURRENT
+build_order() {
+  local stock=$1 lead=$2 drop=$3 current=$4
+  local -a raw=() out=()
+  local token item
+
+  if [[ -n $current ]]; then
+    IFS=',' read -r -a raw <<<"$current"
+  else
+    raw=("$stock" "*" "*fallback" "Snapshots")
+  fi
+
+  append_unique() {
+    local candidate=$1 existing
+    [[ -n $candidate ]] || return 0
+    for existing in "${out[@]}"; do
+      [[ $existing == "$candidate" ]] && return 0
+    done
+    out+=("$candidate")
+  }
+
+  [[ -z $lead ]] || append_unique "$lead"
+  [[ -z $stock ]] || append_unique "$stock"
+  for token in "${raw[@]}"; do
+    item=${token#"${token%%[![:space:]]*}"}
+    item=${item%"${item##*[![:space:]]}"}
+    [[ -n $item ]] || continue
+    [[ -n $drop && $item == "$drop" ]] && continue
+    append_unique "$item"
+  done
+
+  local joined=""
+  for item in "${out[@]}"; do
+    joined+="${joined:+, }$item"
+  done
+  printf '%s' "$joined"
+}
+
+write_boot_order() {
+  local value=$1 tmp
+  tmp=$(mktemp) || write_failed "no temporary file"
+  trap 'rm -f "$tmp"' EXIT
+  awk -v line="BOOT_ORDER=\"$value\"" '
+    /^[[:space:]]*BOOT_ORDER[[:space:]]*=/ { if (!done) { print line; done = 1 }; next }
+    { print }
+    END { if (!done) print line }
+  ' "$limine_default" >"$tmp" || write_failed "could not stage the new BOOT_ORDER"
+  if ! cmp -s "$tmp" "$limine_default"; then
+    install -m644 "$tmp" "$limine_default" || write_failed "could not install the new BOOT_ORDER"
+  fi
+  rm -f "$tmp"
+  trap - EXIT
+}
+
+mode=sync
+target=""
+case ${1:-} in
+  "") ;;
+  --restore)
+    [[ $# -eq 2 ]] && valid_kernel_name "$2" || {
+      echo "Usage: omarchy-mac-limine-boot-order [--restore <kernel>]" >&2
+      exit 64
+    }
+    mode=restore
+    target=$2
+    ;;
+  -h | --help)
+    echo "Usage: omarchy-mac-limine-boot-order [--restore <kernel>]"
+    exit 0
+    ;;
+  *)
+    echo "Usage: omarchy-mac-limine-boot-order [--restore <kernel>]" >&2
+    exit 64
+    ;;
+esac
+
+[[ -f $limine_default ]] || exit 0
+
+if [[ $mode == restore ]]; then
+  current=$(read_boot_order)
+  [[ -n $current ]] || exit 0
+  stock=$(detect_stock_kernel || true)
+  new_order=$(build_order "$stock" "" "$target" "$current")
+  [[ -n $new_order ]] && write_boot_order "$new_order"
+  exit 0
+fi
+
+side=$(read_default_side || true)
+[[ -n $side ]] || exit 0
+if ! valid_kernel_name "$side"; then
+  echo "omarchy-mac-limine-boot-order: ignoring invalid side kernel name '$side' in $default_side_file" >&2
+  exit 0
+fi
+
+stock=$(detect_stock_kernel || true)
+if [[ -z $stock ]]; then
+  echo "omarchy-mac-limine-boot-order: cannot determine the stock Apple Silicon kernel; leaving $limine_default unchanged" >&2
+  exit 0
+fi
+
+current=$(read_boot_order)
+if [[ $side != "$stock" ]] && is_declared_installed_side "$side"; then
+  new_order=$(build_order "$stock" "$side" "" "$current")
+else
+  # Side kernel was removed or is not declared: ensure stock kernel leads.
+  new_order=$(build_order "$stock" "" "$side" "$current")
+fi
+[[ -n $new_order ]] && write_boot_order "$new_order"

@@ -1,0 +1,18 @@
+# omarchy-macos-vm: keep the persistent default boot kernel reconciled on
+# package upgrades (including migrating off the legacy oneshot-restore unit)
+# and restore stock linux-aurora as default on package removal.
+
+post_upgrade() {
+  rm -f /etc/systemd/system/multi-user.target.wants/omarchy-macos-vm-oneshot-restore.service
+  if [[ -e /etc/omarchy/macos-vm.enabled && -e /var/lib/omarchy/macos-vm/done &&
+    -x /usr/lib/omarchy-macos-vm/omarchy-macos-vm-boot-default ]]; then
+    /usr/lib/omarchy-macos-vm/omarchy-macos-vm-boot-default enable || true
+  fi
+}
+
+pre_remove() {
+  rm -f /etc/systemd/system/multi-user.target.wants/omarchy-macos-vm-oneshot-restore.service
+  if [[ -x /usr/lib/omarchy-macos-vm/omarchy-macos-vm-boot-default ]]; then
+    /usr/lib/omarchy-macos-vm/omarchy-macos-vm-boot-default disable || true
+  fi
+}
