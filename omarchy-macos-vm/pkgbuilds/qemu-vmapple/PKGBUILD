@@ -63,6 +63,9 @@ prepare() {
 }
 
 build() {
+  # One codegen unit per crate: rustc's crate-local ThinLTO names promoted locals after a hash of
+  # each unit's bitcode, which LLVM does not emit the same on every run (phi operand order).
+  local -x CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
   # reims-vgpu's inline ldsetal/ldapr need LSE and RCpc. apple-m1, the M1/M2 floor,
   # has both (native on the M1 Max builder). Appended to makepkg.conf's RUSTFLAGS,
   # which would override a target-specific variable.
