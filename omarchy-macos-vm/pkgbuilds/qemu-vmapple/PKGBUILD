@@ -16,7 +16,9 @@ url="https://github.com/sapoepsilon/omvm"
 license=('GPL-2.0-or-later' 'LGPL-3.0-or-later')
 depends=(glib2 pixman gtk3 vulkan-icd-loader libslirp dtc zlib libepoxy wayland libxkbcommon
          gnutls nettle libpipewire sdl3)
-makedepends=(git rustup ninja meson cmake python python-distlib vulkan-headers clang lld pkgconf)
+# libxss: reims-vgpu's static SDL3 configure fails without its header and soname. SDL only
+# dlopens libXss.so.1 for screensaver suspend, which reims never asks for, so no depends entry.
+makedepends=(git rustup ninja meson cmake python python-distlib vulkan-headers clang lld pkgconf libxss)
 options=('!strip' '!lto')
 _qemu_commit=1b41f5f5db4d1067d023973b9bd74c7b341e0d28
 _reims_commit=1fe0acb68b287db36f1e6c7b9f45383940b8a76f
